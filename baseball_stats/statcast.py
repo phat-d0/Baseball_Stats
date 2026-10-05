@@ -11,7 +11,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from . import config
+from . import config, mlb_api
 from .http import get
 
 SWINGS = {
@@ -29,7 +29,7 @@ COLUMNS = [
 ]
 
 
-def fetch_day(day: date, *, game_type: str = "R") -> pd.DataFrame:
+def fetch_day(day: date, *, game_type: str = mlb_api.ALL_GAME_TYPES) -> pd.DataFrame:
     params = {
         "all": "true",
         "type": "details",

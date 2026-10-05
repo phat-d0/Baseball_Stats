@@ -43,11 +43,20 @@ def training_rows(df: pd.DataFrame, kind: str) -> pd.DataFrame:
     return rows
 
 
-def _regressor() -> HistGradientBoostingRegressor:
+# Chosen with scripts/evaluate.py (walk-forward over five held-out months). Single-game
+# hitter totals are very noisy, so the hitter model is far more heavily smoothed.
+PARAMS = {
+    "batter": dict(learning_rate=0.02, max_iter=800, max_leaf_nodes=7,
+                   min_samples_leaf=800, l2_regularization=10.0),
+    "pitcher": dict(learning_rate=0.05, max_iter=400, max_leaf_nodes=31,
+                    min_samples_leaf=80, l2_regularization=1.0),
+}
+
+
+def _regressor(kind: str = "pitcher") -> HistGradientBoostingRegressor:
     return HistGradientBoostingRegressor(
-        loss="poisson", learning_rate=0.05, max_iter=400, max_leaf_nodes=31,
-        min_samples_leaf=80, l2_regularization=1.0, early_stopping=True,
-        validation_fraction=0.1, n_iter_no_change=30, random_state=0,
+        loss="poisson", early_stopping=True, validation_fraction=0.1,
+        n_iter_no_change=30, random_state=0, **PARAMS[kind],
     )
 
 
@@ -75,9 +84,13 @@ def p_over(dist: np.ndarray, line: float) -> np.ndarray:
 @dataclass
 class CountModel:
     kind: str
-    reg: HistGradientBoostingRegressor = field(default_factory=_regressor)
+    reg: HistGradientBoostingRegressor | None = None
     alpha: float = 0.1
     columns: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        if self.reg is None:
+            self.reg = _regressor(self.kind)
 
     def fit(self, df: pd.DataFrame) -> CountModel:
         rows = training_rows(df, self.kind)
@@ -118,12 +131,18 @@ def evaluate(df: pd.DataFrame, kind: str, *, test_days: int = 30,
     if len(train) < 500 or len(test) < 50:
         return {}, 0.1
     m = CountModel(kind).fit(train)
-    # Fit the dispersion on the last part of the training window, not the test set.
-    late = train[train["game_date"] > cutoff - pd.Timedelta(days=test_days)]
-    m.alpha = fit_alpha(late[TARGETS[kind]].to_numpy(), m.predict(late))
     y = test[TARGETS[kind]].to_numpy()
+    # The spread is fitted on games the model didn't train on: residuals on its own
+    # training games are too small and would make the over/under chances overconfident.
+    m.alpha = fit_alpha(y, m.predict(test))
     mu, dist = m.distribution(test)
     base = baseline(test, kind)
+    base_dist = pmf(base, m.alpha, MAX_COUNT[kind])
+
+    def logloss(d):
+        p = np.clip(np.concatenate([p_over(d, ln) for ln in lines]), 1e-6, 1 - 1e-6)
+        h = np.concatenate([y > ln for ln in lines])
+        return float(-np.mean(np.where(h, np.log(p), np.log(1 - p))))
 
     # Calibration: every (row, line) pair, bucketed by predicted P(over).
     probs = np.concatenate([p_over(dist, ln) for ln in lines])
@@ -149,6 +168,9 @@ def evaluate(df: pd.DataFrame, kind: str, *, test_days: int = 30,
         "mae_baseline": float(np.mean(np.abs(y - base))),
         "rmse_model": float(np.sqrt(np.mean((y - mu) ** 2))),
         "rmse_baseline": float(np.sqrt(np.mean((y - base) ** 2))),
+        # Log loss of P(over) across the app's lines: how good the over/under chances are.
+        "logloss_model": logloss(dist),
+        "logloss_baseline": logloss(base_dist),
         "calibration": calib,
         "top_picks": {"line": main, "n": int(len(top)),
                       "predicted": float(top["_p"].mean()), "actual": float(top["_hit"].mean())},

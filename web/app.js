@@ -447,19 +447,20 @@ function viewRecord() {
     .map(([k, l]) => `<button data-rec="${k}" class="${k === state.recKind ? "on" : ""}">${l}</button>`).join("")}</div>`;
   if (!rec || !rec.n) return `${toggle}<div class="empty">Not enough finished games yet to grade the model.</div>`;
   const unit = state.recKind === "batter" ? "H+R+RBI" : "K";
-  const better = rec.mae_baseline - rec.mae_model;
+  // Log loss of the over/under chances: how much better than the player's season average.
+  const llGain = rec.logloss_baseline ? (rec.logloss_baseline - rec.logloss_model) / rec.logloss_baseline : null;
   const tp = rec.top_picks || {};
   return `${toggle}
     <h2 class="section-title">Last ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days, not used in training</h2>
     <div class="tiles">
-      <div class="tile"><div class="label">Average miss</div><div class="value">${fix(rec.mae_model, 2)}</div><div class="sub">${unit} per game</div></div>
-      <div class="tile"><div class="label">Season average's miss</div><div class="value">${fix(rec.mae_baseline, 2)}</div><div class="sub">${better >= 0 ? `model ${(better / rec.mae_baseline * 100).toFixed(0)}% closer` : "model not better yet"}</div></div>
+      <div class="tile"><div class="label">Over/under chances</div><div class="value">${llGain == null ? "–" : `${llGain >= 0 ? "+" : "−"}${Math.abs(llGain * 100).toFixed(1)}%`}</div><div class="sub">${llGain == null ? "" : llGain >= 0 ? "better than season average" : "worse than season average"}</div></div>
+      <div class="tile"><div class="label">Average miss</div><div class="value">${fix(rec.mae_model, 2)}</div><div class="sub">${unit} per game · season avg ${fix(rec.mae_baseline, 2)}</div></div>
       <div class="tile"><div class="label">Daily top-10 over ${tp.line}</div><div class="value">${pct(tp.actual)}</div><div class="sub">hit · model said ${pct(tp.predicted)}</div></div>
       <div class="tile"><div class="label">${state.recKind === "batter" ? "Hitter" : "Starter"} games graded</div><div class="value">${rec.n.toLocaleString()}</div><div class="sub">${shortDate(rec.test_from)} – ${shortDate(rec.test_to)}</div></div>
     </div>
     <h2 class="section-title">Are the chances honest?</h2>
     <div class="card">${calibrationChart(rec.calibration || [])}</div>
-    <p class="note">"Season average" is the player's own ${unit} per game this season, the obvious guess without a model. The model retrains every run on all finished games; this check holds out the most recent ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days.</p>`;
+    <p class="note">"Season average" is the player's own ${unit} per game this season, the obvious guess without a model. "Over/under chances" scores the chance of going over every line (log loss); it's what matters for betting, and it can improve even when the average miss barely moves. The model retrains every run on all finished games; this check holds out the most recent ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days.</p>`;
 }
 
 // ---------- shell ----------

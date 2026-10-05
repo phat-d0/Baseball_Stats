@@ -1,6 +1,6 @@
 // Offline support: app shell is cached; data.json is network-first so you always get
 // the latest predictions when online and the last ones when not.
-const CACHE = "mlb-model-v2";
+const CACHE = "mlb-model-v3";
 const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {

@@ -12,7 +12,7 @@ SCHEDULE_HYDRATE = "team,probablePitcher,venue,weather,lineups,officials"
 ALL_GAME_TYPES = "R,F,D,L,W"
 
 
-def schedule(start: date, end: date, *, game_type: str = "R", cache: bool = True) -> dict:
+def schedule(start: date, end: date, *, game_type: str = ALL_GAME_TYPES, cache: bool = True) -> dict:
     """Schedule for a date range, hydrated with probables, lineups and weather.
 
     ``game_type``: comma-separated codes: R regular season, F/D/L/W postseason rounds.

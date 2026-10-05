@@ -23,9 +23,10 @@ icon, works offline, and follows your phone's dark mode. Tabs:
 - **Pitchers**: starters ranked by projected strikeouts, with the chance of going over
   3.5–7.5. Tap one for the distribution, fair odds and why (recent form, opposing lineup's
   strikeout rate, umpire, park).
-- **Record**: how the model did over the most recent 30 days it wasn't trained on: average
-  miss vs the player's season average, the daily top-10 picks' hit rate, and a calibration
-  chart showing whether "70%" really happens about 70% of the time.
+- **Record**: how the model did over the most recent 30 days it wasn't trained on: how much
+  better its over/under chances are than the player's season average (log loss across the
+  lines), average miss, the daily top-10 picks' hit rate, and a calibration chart showing
+  whether "70%" really happens about 70% of the time.
 
 **DraftKings props:** player prop prices (pitcher strikeouts, batter H+R+RBI) come from
 DraftKings via [The Odds API](https://the-odds-api.com) (`baseball_stats/odds.py`). The Games
@@ -155,6 +156,31 @@ LightGBM/XGBoost handle that natively; for linear models, impute or use the `_sh
 target to predict the average. Real outcomes are more spread out than Poisson, so each
 prediction becomes a negative binomial distribution whose extra spread is fitted on recent
 held-out games. That distribution gives the chance of going over any line.
+
+### Matchup scores
+
+Both models score each batter-vs-starter pairing with the log5 (odds-ratio) method, which
+combines the batter's rate, the pitcher's rate allowed and the league rate. A .300 strikeout
+batter facing a .300 strikeout pitcher in a .220 league strikes out about 39% of the time.
+
+- **Pitchers:** each opposing hitter's strikeout chance vs this starter (using the hitter's
+  K% vs that hand) times the plate appearances his lineup slot gets before the starter's
+  expected exit, summed: `exp_k_matchup`, the strikeouts this lineup should give him.
+- **Hitters:** log5 hit, walk, HR, on-base and K rates vs today's starter, expected PAs vs
+  him and for the lineup slot, and the on-base rates of the two hitters ahead (RBI chances)
+  and behind (runs).
+
+### Evaluating changes
+
+`python scripts/evaluate.py` trains each variant on games before each of five held-out
+months and scores that month: average miss, Poisson deviance, and log loss of the
+over/under chances. Results on 2024–2026 data (lower is better):
+
+| | Hitter log loss | Pitcher log loss |
+|---|---|---|
+| Season average | 0.664 | 0.544 |
+| First model | 0.641 | 0.518 |
+| + matchup scores, tuned | **0.634** | **0.516** |
 
 ## Modelling notes
 

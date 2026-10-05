@@ -43,7 +43,7 @@ def dedupe_games(games: pd.DataFrame) -> pd.DataFrame:
     return order.drop_duplicates("game_pk", keep="last").drop(columns="_final").reset_index(drop=True)
 
 
-def collect_games(start: date, end: date, *, game_type: str = "R",
+def collect_games(start: date, end: date, *, game_type: str = mlb_api.ALL_GAME_TYPES,
                   skip_existing: bool = True) -> dict[str, pd.DataFrame]:
     """Fetch schedule + boxscores for finished games in [start, end] and upsert them.
 
@@ -133,7 +133,7 @@ def update_players(*frames: pd.DataFrame, extra_ids: list[int] | None = None) ->
     return storage.upsert("players", pd.DataFrame(rows))
 
 
-def collect_statcast(start: date, end: date, *, game_type: str = "R") -> dict[str, pd.DataFrame]:
+def collect_statcast(start: date, end: date, *, game_type: str = mlb_api.ALL_GAME_TYPES) -> dict[str, pd.DataFrame]:
     """Fetch pitch-level Statcast data and store per-game batter/pitcher aggregates."""
     out = {}
     for s, e in _month_chunks(start, end):
