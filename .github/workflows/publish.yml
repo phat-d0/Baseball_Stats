@@ -14,7 +14,8 @@ on:
     paths: ["baseball_stats/**", "web/**", "requirements.txt", ".github/workflows/publish.yml"]
 
 permissions:
-  contents: read
+  contents: write # data-snapshot branch
+
   pages: write
   id-token: write
 
@@ -67,6 +68,25 @@ jobs:
         with:
           path: data/processed
           key: processed-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # A copy of the processed tables for model development (manual runs + once a day).
+      # One commit, force-pushed, so the branch never grows.
+      - name: Snapshot processed data to the data-snapshot branch
+        if: success()
+        continue-on-error: true
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] && [ "$(date -u +%H)" != 10 ]; then exit 0; fi
+          snap=$(mktemp -d)
+          mkdir "$snap/processed"
+          cp data/processed/*.parquet "$snap/processed/"
+          cd "$snap"
+          git init -q -b data-snapshot
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q --allow-empty -m "Processed data snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+          git add processed
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q --amend --no-edit
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data-snapshot
 
       - uses: actions/upload-pages-artifact@v3
         with:
