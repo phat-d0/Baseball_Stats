@@ -388,7 +388,13 @@ def pitcher_base(pit: pd.DataFrame, players: pd.DataFrame, sc_pit: pd.DataFrame,
     targets = ["k", "outs", "bf", "pitches"]
     t = s[targets].where(s["_played"] == 1)
     t.columns = [f"target_{c}" for c in targets]
-    return pd.concat([s[id_cols], feats, t], axis=1)
+    out = pd.concat([s[id_cols], feats, t], axis=1)
+    # Every appearance (relievers too), for the plate-appearance outcome model.
+    hand = players.set_index("player_id")["pitch_hand"]
+    out.attrs["rates"] = allp.assign(pitch_hand=allp["player_id"].map(hand))[
+        ["game_pk", "player_id", "is_starter", "pitch_hand", "k_pct_shr", "h_per_bf_shr",
+         "bb_per_bf_shr", "hr_per_bf_shr"]].reset_index(drop=True)
+    return out
 
 
 MATCHUP_RATES = {  # score: (batter rate, starter's rate allowed, league rate)
@@ -518,6 +524,7 @@ def build_features(inputs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
 
     bf = batter_base(bat, players, sc_bat, league_k_bat)
     pf = pitcher_base(pit, players, sc_pit, league_k_pit)
+    pitcher_rates = pf.attrs.pop("rates")
     bf = matchups(bf, pf)
 
     # ---- pitcher table: + opposing lineup / team, park, ump, weather, own team leash
@@ -553,4 +560,5 @@ def build_features(inputs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
                                 "league_r_per_pa"]], on="game_pk", how="left")
                     .merge(weather, on="game_pk", how="left"))
 
-    return {"batter_hrr": _sort(batter_hrr), "pitcher_k": _sort(pitcher_k)}
+    return {"batter_hrr": _sort(batter_hrr), "pitcher_k": _sort(pitcher_k),
+            "pitcher_rates": pitcher_rates}

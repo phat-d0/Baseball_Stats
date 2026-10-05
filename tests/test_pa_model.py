@@ -105,3 +105,69 @@ def test_publish_backfills_plate_appearances(fake, tmp_path, monkeypatch):
     publish.update_statcast(today, START)
     publish.update_statcast(today, START)
     assert len(publish.statcast_days_missing(today, START)) == 0
+
+
+# ---- models -------------------------------------------------------------------
+
+from baseball_stats import features, pa_model  # noqa: E402
+
+
+@pytest.fixture
+def trained(fake):
+    collect.collect_games(START, date(2025, 4, 30))
+    collect.store_statcast(_all_pitches(fake))
+    built = features.build_features(features.load_inputs())
+    pa = storage.read("plate_appearances")
+    return pa, built
+
+
+def test_outcome_probabilities_sum_to_one(trained):
+    pa, built = trained
+    m = pa_model.OutcomeModel(max_iter=50).fit(pa, built, calib_days=7)
+    p = m.proba_for(pa_model.pa_matchups(pa), built)
+    assert p.shape == (len(pa), 7)
+    assert np.allclose(p.sum(axis=1), 1) and (p > 0).all()
+    assert abs(p[:, 0].mean() - (pa["outcome"] == "K").mean()) < 0.03
+
+
+def test_stay_model_and_pitch_sampler(trained):
+    pa, built = trained
+    stay = pa_model.StayModel().fit(pa, built)
+    ing = pa_model.starter_ingame(pa)
+    x = stay.features(ing, pa_model.starter_pregame(built))
+    prob = stay.predict(x)
+    assert ((prob >= 0) & (prob <= 1)).all()
+    # Deep into a start, leaving is far likelier than after the first batter.
+    deep, early = x.copy(), x.copy()
+    deep["bf"], deep["pitches"], early["bf"], early["pitches"] = 27, 105, 1, 4
+    assert stay.predict(deep).mean() > stay.predict(early).mean()
+    ps = pa_model.PitchSampler().fit(pa)
+    rng = np.random.default_rng(0)
+    draws = ps.draw(np.zeros(20000, int), 1.0, rng)
+    assert abs(draws.mean() - pa.loc[pa["outcome"] == "K", "pitches"].mean()) < 0.2
+    assert ps.draw(np.zeros(20000, int), 1.3, rng).mean() > draws.mean()
+
+
+def test_no_leakage_in_model_inputs(fake):
+    """Changing a game's results never changes a model input for that game or earlier."""
+    collect.collect_games(START, date(2025, 4, 30))
+    collect.store_statcast(_all_pitches(fake))
+    pa = storage.read("plate_appearances")
+    target_pk = int(pa.loc[pa["game_date"] == pd.Timestamp("2025-04-20"), "game_pk"].iloc[0])
+
+    def inputs():
+        built = features.build_features(features.load_inputs())
+        keep = pa[pa["game_date"] <= pd.Timestamp("2025-04-20")]
+        x = pa_model.matchup_features(pa_model.pa_matchups(keep), built)
+        s = pa_model.StayModel().features(pa_model.starter_ingame(keep), pa_model.starter_pregame(built))
+        drop = [c for c in s if c in pa_model.STAY_INGAME]  # in-game state is the PA itself
+        return x, s.drop(columns=drop)
+
+    x0, s0 = inputs()
+    for table, col, bump in (("batter_games", "h", 3), ("pitcher_games", "k", 5)):
+        df = storage.read(table)
+        df.loc[df["game_pk"] == target_pk, col] += bump
+        storage.write(df, storage.table_path(table))
+    x1, s1 = inputs()
+    pd.testing.assert_frame_equal(x0, x1)
+    pd.testing.assert_frame_equal(s0, s1)

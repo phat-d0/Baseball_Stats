@@ -1,23 +1,31 @@
 """Compare model variants on several held-out months (walk-forward).
 
-    python scripts/evaluate.py                 # both targets, default variants
-    python scripts/evaluate.py --kind pitcher
+    python scripts/evaluate.py --kind pitcher                  # current, pa_simple, pa_seq
+    python scripts/evaluate.py --kind batter
+    python scripts/evaluate.py --kind pitcher --variants current pa_seq --sims 4000
 
-For each test month, every variant is trained only on games before that month.
-Reported per variant (averaged over folds, lower is better):
+For each test month every variant is trained only on games before that month. Each
+variant returns the full probability distribution for every test row, scored on
+(lower is better unless noted):
 
-* mae       average absolute miss
-* deviance  Poisson deviance (rewards getting the whole mean right, not just the median)
-* logloss   log loss of P(over) across the app's lines - what the over/under chances
-            are judged on; the baseline uses the player's season average with the same
-            negative binomial spread
+* logloss    log loss of P(over) across the app's lines (primary)
+* rps        ranked probability score of the whole distribution
+* calib@L    calibration error at line L: mean |predicted - observed over rate| over ten
+             equal-count buckets
+* cover50/80 share of results inside the central 50% / 80% range (closer to nominal is better)
+* mae        average miss of the expected count (secondary)
+
+Results are reported overall and by cut (pitchers: thirds of recent pitches per start).
+The ship gate from the plate-appearance spec is applied against ``current``.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -25,31 +33,47 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from baseball_stats import features, model  # noqa: E402
+from baseball_stats import features, model, pa_model, simulate, storage  # noqa: E402
 
 LINES = {"batter": [0.5, 1.5, 2.5], "pitcher": [3.5, 4.5, 5.5, 6.5, 7.5]}
 FOLDS = ["2025-06", "2025-08", "2026-05", "2026-07", "2026-09"]
 
-# Columns added by the matchup work; the "base" variant leaves them out.
-MATCHUP_COLS = {
-    "batter": ["m_k", "m_h", "m_bb", "m_hr", "m_onbase", "pa_vs_sp", "exp_h_vs_sp",
-               "exp_onbase_vs_sp", "ahead_onbase", "behind_onbase", "slot_pa_exp",
-               "opp_sp_k_pct_shr", "opp_sp_h_per_bf_shr", "opp_sp_bb_per_bf_shr",
-               "opp_sp_hr_per_bf_shr", "opp_sp_exp_bf", "h_per_pa_shr", "bb_pct_shr",
-               "hr_per_pa_shr", "onbase_shr", "h_per_pa_vs_hand_shr",
-               "lg_k_pa", "lg_h_pa", "lg_bb_pa", "lg_hr_pa"],
-    "pitcher": ["exp_k_matchup", "lineup_k_log5", "exp_onbase_matchup", "exp_hr_matchup",
-                "matchup_batters", "exp_bf", "h_per_bf_shr", "bb_per_bf_shr", "hr_per_bf_shr"],
-}
 
+# --------------------------------------------------------------------------- #
+# Measures
+# --------------------------------------------------------------------------- #
 
-def nb_logloss(y: np.ndarray, dist: np.ndarray, lines: list[float]) -> float:
+def line_logloss(y: np.ndarray, dist: np.ndarray, lines: list[float]) -> float:
     ll = []
     for ln in lines:
         p = np.clip(model.p_over(dist, ln), 1e-6, 1 - 1e-6)
-        hit = y > ln
-        ll.append(-np.where(hit, np.log(p), np.log(1 - p)))
+        ll.append(-np.where(y > ln, np.log(p), np.log(1 - p)))
     return float(np.mean(np.concatenate(ll)))
+
+
+nb_logloss = line_logloss  # older name, kept for scripts that import it
+
+
+def rps(y: np.ndarray, dist: np.ndarray) -> float:
+    """Ranked probability score over 0..MAX (last cell is 'MAX or more')."""
+    cdf = np.cumsum(dist, axis=1)[:, :-1]
+    obs = (np.minimum(y, dist.shape[1] - 1)[:, None] <= np.arange(dist.shape[1] - 1)[None, :])
+    return float(np.mean(np.sum((cdf - obs) ** 2, axis=1) / (dist.shape[1] - 1)))
+
+
+def calib_error(y: np.ndarray, dist: np.ndarray, line: float, buckets: int = 10) -> float:
+    p = model.p_over(dist, line)
+    hit = (y > line).astype(float)
+    order = np.argsort(p)
+    gaps = [abs(p[c].mean() - hit[c].mean()) for c in np.array_split(order, buckets) if len(c)]
+    return float(np.mean(gaps))
+
+
+def coverage(y: np.ndarray, dist: np.ndarray, level: float) -> float:
+    cdf = np.cumsum(dist, axis=1)
+    lo = (cdf < (1 - level) / 2).sum(axis=1)
+    hi = (cdf < 1 - (1 - level) / 2).sum(axis=1)
+    return float(np.mean((y >= lo) & (y <= hi)))
 
 
 def poisson_deviance(y: np.ndarray, mu: np.ndarray) -> float:
@@ -58,105 +82,264 @@ def poisson_deviance(y: np.ndarray, mu: np.ndarray) -> float:
     return float(2 * np.mean(term - (y - mu)))
 
 
-def score(y, mu, alpha, kind):
-    dist = model.pmf(mu, alpha, model.MAX_COUNT[kind])
-    return {"mae": float(np.mean(np.abs(y - mu))), "deviance": poisson_deviance(y, mu),
-            "logloss": nb_logloss(y, dist, LINES[kind])}
-
-
-def run_fold(rows: pd.DataFrame, kind: str, month: str, variants: dict) -> dict:
-    start = pd.Timestamp(f"{month}-01")
-    end = start + pd.offsets.MonthEnd(1)
-    train, test = rows[rows["game_date"] < start], rows[rows["game_date"].between(start, end)]
-    if len(test) < 50:
-        return {}
-    target = model.TARGETS[kind]
-    y = test[target].to_numpy()
-    out = {}
-    calib = train[train["game_date"] >= start - pd.Timedelta(days=30)]
-    for name, fn in variants.items():
-        t0 = time.time()
-        mu_test, mu_calib = fn(train, test, calib)
-        alpha = model.fit_alpha(calib[target].to_numpy(), mu_calib)
-        out[name] = {**score(y, mu_test, alpha, kind), "alpha": alpha, "secs": time.time() - t0}
-    out["_n"] = len(test)
+def measures(y: np.ndarray, mu: np.ndarray, dist: np.ndarray, kind: str) -> dict:
+    out = {"n": int(len(y)), "logloss": line_logloss(y, dist, LINES[kind]), "rps": rps(y, dist),
+           "cover50": coverage(y, dist, 0.5), "cover80": coverage(y, dist, 0.8),
+           "mae": float(np.mean(np.abs(y - mu))), "deviance": poisson_deviance(y, mu)}
+    for ln in LINES[kind]:
+        out[f"calib@{ln:g}"] = calib_error(y, dist, ln)
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Folds and variants
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class Fold:
+    kind: str
+    start: pd.Timestamp
+    train: pd.DataFrame
+    test: pd.DataFrame
+    calib: pd.DataFrame
+    built: dict
+    pa: pd.DataFrame  # plate appearances before the fold (may be empty)
+    players: pd.DataFrame
+    sims: int
+
+
+def _pmf_variant(predict):
+    """Wrap a point forecast as a distribution: NB with alpha fitted on the calib window."""
+    def fn(f: Fold):
+        mu_test, mu_calib = predict(f)
+        alpha = model.fit_alpha(f.calib[model.TARGETS[f.kind]].to_numpy(), mu_calib)
+        return mu_test, model.pmf(mu_test, alpha, model.MAX_COUNT[f.kind])
+    return fn
+
+
 def gbm_variant(kind: str, drop: list[str] | None = None, **params):
-    def fn(train, test, calib):
-        tr, te, ca = (d.drop(columns=[c for c in (drop or []) if c in d]) for d in (train, test, calib))
+    def predict(f: Fold):
+        tr, te, ca = (d.drop(columns=[c for c in (drop or []) if c in d]) for d in (f.train, f.test, f.calib))
         m = model.CountModel(kind)
         if params:
             m.reg.set_params(**params)
         m.fit(tr)
         return m.predict(te), m.predict(ca)
-    return fn
+    return _pmf_variant(predict)
 
 
-def components_variant(drop: list[str] | None = None, **params):
+def components_variant(**params):
     """Hitters: separate models for hits, runs and RBIs; the projection is their sum."""
-    def fn(train, test, calib):
-        mu_t, mu_c = np.zeros(len(test)), np.zeros(len(calib))
+    def predict(f: Fold):
+        mu_t, mu_c = np.zeros(len(f.test)), np.zeros(len(f.calib))
         for part in ("target_h", "target_r", "target_rbi"):
             m = model.CountModel("batter")
             if params:
                 m.reg.set_params(**params)
-            cols = [c for c in (drop or [])]
-            tr = train.drop(columns=[c for c in cols if c in train]).assign(target_hrr=train[part])
-            m.fit(tr)
-            mu_t += m.predict(test.drop(columns=[c for c in cols if c in test]))
-            mu_c += m.predict(calib.drop(columns=[c for c in cols if c in calib]))
+            m.fit(f.train.assign(target_hrr=f.train[part]))
+            mu_t += m.predict(f.test)
+            mu_c += m.predict(f.calib)
         return mu_t, mu_c
-    return fn
+    return _pmf_variant(predict)
 
 
 def baseline_variant(kind: str):
-    def fn(train, test, calib):
-        return model.baseline(test, kind), model.baseline(calib, kind)
+    return _pmf_variant(lambda f: (model.baseline(f.test, kind), model.baseline(f.calib, kind)))
+
+
+def _pa_models(f: Fold, stay: bool = True):
+    if f.pa.empty:
+        raise RuntimeError("no plate appearances before this fold")
+    outcome = pa_model.OutcomeModel().fit(f.pa, f.built)
+    sampler = pa_model.PitchSampler().fit(f.pa)
+    stay_m = pa_model.StayModel().fit(f.pa, f.built) if stay else None
+    m = simulate.lineup_matchups(f.test, f.built["batter_hrr"], f.players)
+    probs = simulate.lineup_probs(m, outcome, f.built)
+    return outcome, sampler, stay_m, probs
+
+
+def _fallback(f: Fold):
+    """Starts with no known lineup fall back to the current model."""
+    return gbm_variant("pitcher")(f)
+
+
+def pa_seq_variant():
+    """Batter-by-batter simulation: outcome model + stay-or-go + pitch counts."""
+    def fn(f: Fold):
+        _, sampler, stay, probs = _pa_models(f)
+        pre = pa_model.starter_pregame(f.built).set_index(["game_pk", "pitcher"])
+        pre_cols = [c for c in stay.columns if c not in pa_model.STAY_INGAME]
+        ratio = pa_model.pitcher_ppb_ratio(f.test, sampler.league_ppb)
+        mu_fb, dist_fb = _fallback(f)
+        mu, dist = mu_fb.copy(), dist_fb.copy()
+        for i, r in enumerate(f.test.itertuples(index=False)):
+            key = (int(r.game_pk), int(r.player_id))
+            if key not in probs:
+                continue
+            row = pre.loc[key] if key in pre.index else pd.Series(dtype=float)
+            row = row.reindex(pre_cols) if len(row) else pd.Series(np.nan, index=pre_cols)
+            grid = simulate.stay_grid(stay, row)
+            sim = simulate.simulate_start(probs[key], grid, sampler, float(ratio.iloc[i]),
+                                          seed=simulate.seed_for(*key), n_sims=f.sims)
+            dist[i] = simulate.distribution(sim["k"], model.MAX_COUNT["pitcher"])
+            mu[i] = sim["k"].mean()
+        return mu, dist
     return fn
 
 
-def variants_for(kind: str) -> dict:
-    return {
-        "season_avg": baseline_variant(kind),
-        "base": gbm_variant(kind, drop=MATCHUP_COLS[kind]),
-        "matchup": gbm_variant(kind),
-        "matchup_smooth": gbm_variant(kind, learning_rate=0.03, max_leaf_nodes=15,
-                                      min_samples_leaf=300, l2_regularization=5.0),
-        **({"components": components_variant()} if kind == "batter" else {}),
+def pa_simple_variant():
+    """Outcome model for each batter's strikeout chance; batters faced from a direct
+    model of target_bf, independent of what happens in the game."""
+    def fn(f: Fold):
+        _, _, _, probs = _pa_models(f, stay=False)
+        bf_model = model.CountModel("pitcher")
+        bf_model.fit(f.train.assign(target_k=f.train["target_bf"]))
+        mu_bf = bf_model.predict(f.test)
+        mu_fb, dist_fb = _fallback(f)
+        mu, dist = mu_fb.copy(), dist_fb.copy()
+        K = model.MAX_COUNT["pitcher"]
+        b = np.arange(1, simulate.MAX_BF + 1)
+        kidx = simulate.K
+        for i, r in enumerate(f.test.itertuples(index=False)):
+            key = (int(r.game_pk), int(r.player_id))
+            if key not in probs:
+                continue
+            p_bf = model.pmf(np.array([mu_bf[i]]), 1e-4, simulate.MAX_BF + 1)[0][1:simulate.MAX_BF + 1]
+            p_bf = p_bf / p_bf.sum()
+            pk = np.array([probs[key][(j - 1) % 9, min(2, (j - 1) // 9), kidx] for j in b])
+            # Strikeouts after each batter (Poisson-binomial), mixed over batters faced.
+            state = np.zeros(K + 1); state[0] = 1.0
+            out = np.zeros(K + 1)
+            for j in range(len(b)):
+                nxt = state * (1 - pk[j])
+                nxt[1:] += state[:-1] * pk[j]
+                nxt[-1] += state[-1] * pk[j]
+                state = nxt
+                out += p_bf[j] * state
+            out = (1 - simulate.BLEND) * out / out.sum() + simulate.BLEND * model.pmf(
+                np.array([max((out * np.arange(K + 1)).sum(), 1e-3)]), 0.02, K)[0]
+            dist[i] = out / out.sum()
+            mu[i] = float((dist[i] * np.arange(K + 1)).sum())
+        return mu, dist
+    return fn
+
+
+def variants_for(kind: str, names: list[str] | None = None) -> dict:
+    allv = {
+        "batter": {"season_avg": baseline_variant("batter"), "current": gbm_variant("batter"),
+                   "components": components_variant(**model.PARAMS["batter"])},
+        "pitcher": {"season_avg": baseline_variant("pitcher"), "current": gbm_variant("pitcher"),
+                    "pa_simple": pa_simple_variant(), "pa_seq": pa_seq_variant()},
+    }[kind]
+    return {k: v for k, v in allv.items() if names is None or k in names}
+
+
+# --------------------------------------------------------------------------- #
+# Cuts, gate, main
+# --------------------------------------------------------------------------- #
+
+def cuts(test: pd.DataFrame, kind: str) -> dict[str, np.ndarray]:
+    out = {"all": np.ones(len(test), bool)}
+    if kind == "pitcher" and "pitches_per_start_l5" in test:
+        pps = test["pitches_per_start_l5"].to_numpy()
+        lo, hi = np.nanpercentile(pps, [33.3, 66.7]) if np.isfinite(pps).any() else (np.nan, np.nan)
+        out["short leash"] = pps <= lo
+        out["middle"] = (pps > lo) & (pps <= hi)
+        out["workhorse"] = pps > hi
+    if kind == "batter" and "batting_order" in test:
+        bo = test["batting_order"].to_numpy()
+        out["slots 1-3"], out["slots 4-6"], out["slots 7-9"] = bo <= 3, (bo >= 4) & (bo <= 6), bo >= 7
+    if "lineup_confirmed" in test and (~test["lineup_confirmed"].fillna(True).astype(bool)).any():
+        conf = test["lineup_confirmed"].fillna(True).astype(bool).to_numpy()
+        out["confirmed"], out["projected"] = conf, ~conf
+    return out
+
+
+def gate(results: list[dict], candidate: str, kind: str) -> dict:
+    """The spec's ship gate for ``candidate`` against ``current`` (steps 1-3)."""
+    cur = [r["current"]["all"] for r in results]
+    new = [r[candidate]["all"] for r in results]
+    folds_better = sum(n["logloss"] < c["logloss"] for n, c in zip(new, cur))
+    mean = lambda rs, k: float(np.mean([r[k] for r in rs]))  # noqa: E731
+    calib_ok = {f"{ln:g}": mean(new, f"calib@{ln:g}") <= mean(cur, f"calib@{ln:g}") + 0.005
+                for ln in LINES[kind]}
+    checks = {
+        "logloss_mean_lower": mean(new, "logloss") < mean(cur, "logloss"),
+        "logloss_lower_in_4_of_5": folds_better >= min(4, len(results)),
+        "rps_mean_lower": mean(new, "rps") < mean(cur, "rps"),
+        "calibration_within_0.5pp_every_line": all(calib_ok.values()),
     }
+    return {"candidate": candidate, "folds_better": folds_better, "folds": len(results),
+            "calib_ok": calib_ok, **checks, "passed": all(checks.values())}
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kind", choices=["batter", "pitcher", "both"], default="both")
+    ap.add_argument("--kind", choices=["batter", "pitcher"], default="pitcher")
     ap.add_argument("--folds", nargs="*", default=FOLDS)
+    ap.add_argument("--variants", nargs="*", default=None)
+    ap.add_argument("--sims", type=int, default=simulate.N_SIMS)
+    ap.add_argument("--out", default=None, help="write results as JSON here")
     args = ap.parse_args(argv)
 
     t0 = time.time()
-    built = features.build_features(features.load_inputs())
-    print(f"features built in {time.time() - t0:.0f}s", flush=True)
-    kinds = ["batter", "pitcher"] if args.kind == "both" else [args.kind]
-    for kind in kinds:
-        table = built["batter_hrr" if kind == "batter" else "pitcher_k"]
-        rows = model.training_rows(table, kind)
-        variants = variants_for(kind)
-        results = []
-        for month in args.folds:
-            r = run_fold(rows, kind, month, variants)
-            if r:
-                results.append(r)
-                print(f"{kind} {month} n={r['_n']}: " + "  ".join(
-                    f"{v}: mae {r[v]['mae']:.4f} dev {r[v]['deviance']:.4f} ll {r[v]['logloss']:.4f}"
-                    for v in variants), flush=True)
-        if not results:
+    inputs = features.load_inputs()
+    built = features.build_features(inputs)
+    pa_all = storage.read("plate_appearances")
+    print(f"features built in {time.time() - t0:.0f}s; {len(pa_all)} plate appearances", flush=True)
+    kind = args.kind
+    table = built["batter_hrr" if kind == "batter" else "pitcher_k"]
+    rows = model.training_rows(table, kind)
+    variants = variants_for(kind, args.variants)
+    target = model.TARGETS[kind]
+    results = []
+    for month in args.folds:
+        start = pd.Timestamp(f"{month}-01")
+        end = start + pd.offsets.MonthEnd(1)
+        train, test = rows[rows["game_date"] < start], rows[rows["game_date"].between(start, end)]
+        if len(test) < 50:
             continue
-        print(f"\n== {kind}: mean over {len(results)} folds")
-        for v in variants:
-            m = {k: np.mean([r[v][k] for r in results]) for k in ("mae", "deviance", "logloss", "alpha", "secs")}
-            print(f"  {v:12s} mae {m['mae']:.4f}  deviance {m['deviance']:.4f}  "
-                  f"logloss {m['logloss']:.4f}  alpha {m['alpha']:.3f}  ({m['secs']:.0f}s)")
+        pa = pa_all[pd.to_datetime(pa_all["game_date"]) < start] if not pa_all.empty else pa_all
+        f = Fold(kind, start, train, test, train[train["game_date"] >= start - pd.Timedelta(days=30)],
+                 built, pa, inputs["players"], args.sims)
+        y = test[target].to_numpy()
+        fold_res = {"month": month, "n": len(test)}
+        for name, fn in variants.items():
+            t1 = time.time()
+            try:
+                mu, dist = fn(f)
+            except RuntimeError as exc:
+                print(f"  {month} {name}: skipped ({exc})", flush=True)
+                continue
+            fold_res[name] = {c: measures(y[m], mu[m], dist[m], kind)
+                              for c, m in cuts(test, kind).items() if m.sum() >= 30}
+            a = fold_res[name]["all"]
+            print(f"{kind} {month} {name:11s} n={a['n']} logloss {a['logloss']:.4f} rps {a['rps']:.4f} "
+                  f"mae {a['mae']:.3f} cover50 {a['cover50']:.2f} cover80 {a['cover80']:.2f} "
+                  f"({time.time() - t1:.0f}s)", flush=True)
+        results.append(fold_res)
+
+    names = [v for v in variants if all(v in r for r in results)]
+    print(f"\n== {kind}: mean over {len(results)} folds")
+    summary = {}
+    for v in names:
+        cut_names = sorted({c for r in results for c in r[v]}, key=lambda c: (c != "all", c))
+        summary[v] = {}
+        for c in cut_names:
+            rs = [r[v][c] for r in results if c in r[v]]
+            m = {k: float(np.mean([x[k] for x in rs])) for k in rs[0] if k != "n"}
+            m["n"] = int(sum(x["n"] for x in rs))
+            summary[v][c] = m
+            calib = " ".join(f"{k[6:]}:{m[k] * 100:.1f}" for k in m if k.startswith("calib@"))
+            print(f"  {v:11s} {c:12s} n={m['n']:6d} logloss {m['logloss']:.4f} rps {m['rps']:.4f} "
+                  f"mae {m['mae']:.3f} cover50 {m['cover50']:.2f} cover80 {m['cover80']:.2f} calib(pp) {calib}")
+    gates = {v: gate(results, v, kind) for v in names if v not in ("current", "season_avg")}
+    for v, g in gates.items():
+        print(f"\nGATE {v} vs current: {'PASSED' if g['passed'] else 'NOT PASSED'} -> "
+              + ", ".join(f"{k}={g[k]}" for k in g if k not in ("candidate", "calib_ok", "passed")))
+    if args.out:
+        Path(args.out).write_text(json.dumps({"folds": results, "summary": summary, "gates": gates},
+                                             indent=1, default=float))
 
 
 if __name__ == "__main__":
