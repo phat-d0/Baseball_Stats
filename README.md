@@ -43,8 +43,12 @@ Props are priced per game (about 2 credits a game), so refreshes run on a strict
   each game at most once every 2 hours. A game DraftKings hasn't posted props for yet
   costs nothing.
 - The reset day is set to the 5th in the workflow and learned automatically when the
-  balance goes back up. If the key is shared with the soccer app, set the repository
-  variable `ODDS_API_MONTHLY_CAP` (e.g. `250`) so the two apps split it.
+  balance goes back up.
+- The key is shared with the soccer app, so this app spends at most **200 credits a month**
+  (about 6 a day, ~3 games priced once). The soccer app budgets from the real balance and
+  adapts to what's left. Change the cap with the repository variable `ODDS_API_MONTHLY_CAP`
+  (Settings → Secrets and variables → Actions → Variables); `0` removes it, e.g. after
+  upgrading the plan or giving this app its own key.
 
 Refreshing the app on your phone never uses credits.
 

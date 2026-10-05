@@ -249,6 +249,7 @@ def fetch_props(games: pd.DataFrame, *, now: datetime, api_key: str | None = Non
     ledger = Ledger.load()
     reset_day = int(ledger.reset_day or os.environ.get("ODDS_API_RESET_DAY", 1))
     cap = os.environ.get("ODDS_API_MONTHLY_CAP")
+    cap = cap if cap and int(cap) > 0 else None  # empty or 0 = no cap
     today = now.astimezone(EASTERN).date().isoformat()
 
     if not api_key:

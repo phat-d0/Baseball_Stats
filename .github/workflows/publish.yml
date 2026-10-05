@@ -53,9 +53,10 @@ jobs:
           # Day of the month the free allowance resets; learned automatically once
           # the balance goes back up.
           ODDS_API_RESET_DAY: "5"
-          # Optional: max credits per month for this app (when the key is shared
-          # with another app). Empty = use the whole allowance.
-          ODDS_API_MONTHLY_CAP: ${{ vars.ODDS_API_MONTHLY_CAP }}
+          # Max credits per month this app may spend. The key is shared with the soccer
+          # app, which adapts to whatever is left. Override with the repository variable
+          # ODDS_API_MONTHLY_CAP (e.g. 0 = no cap, once this app has its own key).
+          ODDS_API_MONTHLY_CAP: ${{ vars.ODDS_API_MONTHLY_CAP || '200' }}
         run: |
           pip install -r requirements.txt
           python -m baseball_stats publish --out _site --statcast
