@@ -48,6 +48,14 @@ jobs:
       - name: Build site
         env:
           BASEBALL_REQUEST_DELAY: "0.1"
+          # DraftKings props via the-odds-api.com; empty if the secret isn't set yet.
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          # Day of the month the free allowance resets; learned automatically once
+          # the balance goes back up.
+          ODDS_API_RESET_DAY: "5"
+          # Optional: max credits per month for this app (when the key is shared
+          # with another app). Empty = use the whole allowance.
+          ODDS_API_MONTHLY_CAP: ${{ vars.ODDS_API_MONTHLY_CAP }}
         run: |
           pip install -r requirements.txt
           python -m baseball_stats publish --out _site --statcast

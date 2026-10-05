@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import shutil
+from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -19,7 +20,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from . import collect, features, mlb_api, model, slate, storage
+from . import collect, features, mlb_api, model, odds, slate, storage
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +105,24 @@ def find_slates(today: date, inputs: dict) -> list[tuple[date, dict]]:
     return out
 
 
+def book_lines(entries: list[dict] | None, pmf: np.ndarray) -> list[dict] | None:
+    """DraftKings lines for one player, with the model's chance and expected value per side."""
+    if not entries:
+        return None
+    out = []
+    for e in entries:
+        p = float(model.p_over(pmf[None, :], e["line"])[0])
+        do, du = odds.american_to_decimal(e.get("over")), odds.american_to_decimal(e.get("under"))
+        out.append({
+            **e,
+            "p_model": p,
+            "p_book": odds.no_vig_over(e.get("over"), e.get("under")),
+            "ev_over": p * do - 1 if do else None,
+            "ev_under": (1 - p) * du - 1 if du else None,
+        })
+    return out
+
+
 def _pitcher_json(row: pd.Series, mu: float, pmf: np.ndarray, names: dict) -> dict:
     return {
         "id": int(row["player_id"]),
@@ -155,7 +174,7 @@ def _batter_json(row: pd.Series, mu: float, pmf: np.ndarray, names: dict) -> dic
 
 
 def slate_json(day: date, s: dict, models: dict[str, model.CountModel], names: dict,
-               label: str) -> dict:
+               label: str, props: dict | None = None) -> dict:
     bat, pit, games = s["batter_hrr"], s["pitcher_k"], s["games"]
     by_game: dict[int, dict] = {}
     for g in games.itertuples(index=False):
@@ -177,12 +196,16 @@ def slate_json(day: date, s: dict, models: dict[str, model.CountModel], names: d
         mu, dist = models["pitcher"].distribution(pit)
         for (_, row), m, d in zip(pit.iterrows(), mu, dist):
             side = "home" if row["is_home"] else "away"
-            by_game[row["game_pk"]]["pitchers"][side] = _pitcher_json(row, m, d, names)
+            pj = _pitcher_json(row, m, d, names)
+            pj["book"] = book_lines((props or {}).get((row["game_pk"], pj["id"], "pitcher")), d)
+            by_game[row["game_pk"]]["pitchers"][side] = pj
     if not bat.empty:
         mu, dist = models["batter"].distribution(bat)
         for (_, row), m, d in zip(bat.iterrows(), mu, dist):
             side = "home" if row["is_home"] else "away"
-            by_game[row["game_pk"]]["lineups"][side].append(_batter_json(row, m, d, names))
+            bj = _batter_json(row, m, d, names)
+            bj["book"] = book_lines((props or {}).get((row["game_pk"], bj["id"], "batter")), d)
+            by_game[row["game_pk"]]["lineups"][side].append(bj)
         for g in by_game.values():
             for side in ("away", "home"):
                 g["lineups"][side].sort(key=lambda b: b["order"] or 99)
@@ -230,6 +253,19 @@ def publish(out: str | Path, *, history_start: date | None = None,
             return "Tomorrow"
         return d.strftime("%a %b %-d")
 
+    # DraftKings props for today's games only, under the credit budget (see odds.py).
+    props, odds_status = {}, odds.OddsStatus(error="no games today")
+    if slates and slates[0][0] == today:
+        s = slates[0][1]
+        roster = pd.concat([s["batter_hrr"][["game_pk", "player_id"]],
+                            s["pitcher_k"][["game_pk", "player_id"]]], ignore_index=True)
+        roster["name"] = roster["player_id"].map(names)
+        players_by_game = {pk: list(zip(g["player_id"], g["name"].fillna("")))
+                           for pk, g in roster.groupby("game_pk")}
+        events, odds_status = odds.fetch_props(s["games"], now=now)
+        props = odds.props_by_player(events, players_by_game)
+        log.info("odds: %s", odds_status)
+
     stored = storage.read("games")
     final = stored[stored["status"] == "Final"] if not stored.empty else stored
     data = {
@@ -239,7 +275,9 @@ def publish(out: str | Path, *, history_start: date | None = None,
         "lines": {"batter": BATTER_LINES, "pitcher": PITCHER_LINES},
         "model": {k: {"alpha": m.alpha, "trained_rows": int(len(model.training_rows(hist[k], k)))}
                   for k, m in models.items()},
-        "slates": [slate_json(d, s, models, names, label(d)) for d, s in slates],
+        "slates": [slate_json(d, s, models, names, label(d), props if d == today else None)
+                   for d, s in slates],
+        "odds_source": asdict(odds_status),
         "record": record,
     }
     data = _clean(data)

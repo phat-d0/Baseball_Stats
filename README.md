@@ -27,6 +27,27 @@ icon, works offline, and follows your phone's dark mode. Tabs:
   miss vs the player's season average, the daily top-10 picks' hit rate, and a calibration
   chart showing whether "70%" really happens about 70% of the time.
 
+**DraftKings props:** player prop prices (pitcher strikeouts, batter H+R+RBI) come from
+DraftKings via [The Odds API](https://the-odds-api.com) (`baseball_stats/odds.py`). The Games
+tab then opens with **Value picks**: the lines where DraftKings pays more than the model's
+chance is worth, filtered by a minimum edge you choose. Each player's sheet shows the
+DraftKings line next to the model. Add a free API key as the repo secret `ODDS_API_KEY`
+(Settings → Secrets and variables → Actions). Without a key the app just shows fair odds.
+
+Props are priced per game (about 2 credits a game), so refreshes run on a strict budget:
+- Listing the day's games is free and reports the real credit balance.
+- Each day may spend `(credits left − 20 reserve) ÷ days until the monthly reset`. That's
+  about 15 credits, or ~7 games, on the free 500-credit plan. A paid plan automatically
+  buys more games and more refreshes.
+- Games are priced soonest first pitch first, only within 8 hours of first pitch, and
+  each game at most once every 2 hours. A game DraftKings hasn't posted props for yet
+  costs nothing.
+- The reset day is set to the 5th in the workflow and learned automatically when the
+  balance goes back up. If the key is shared with the soccer app, set the repository
+  variable `ODDS_API_MONTHLY_CAP` (e.g. `250`) so the two apps split it.
+
+Refreshing the app on your phone never uses credits.
+
 "Fair" odds are the model's probability written as American odds with no bookmaker margin:
 a bet is only worth a look when your sportsbook pays more than that.
 

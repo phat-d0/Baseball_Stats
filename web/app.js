@@ -12,6 +12,7 @@ const state = {
   batLine: store.get("batLine", 1.5),
   pitLine: store.get("pitLine", 5.5),
   recKind: store.get("recKind", "batter"),
+  minEdge: store.get("minEdge", 0.05),
   query: "",
   sheetLine: null, // line picked inside an open player sheet
   sheetPlayer: null,
@@ -42,6 +43,86 @@ function gameTime(iso) {
   if (!iso) return "TBD";
   const d = new Date(iso);
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+// ---------- DraftKings props ----------
+const EDGE_STEPS = [0.02, 0.05, 0.08, 0.12];
+const american = (a) => (a == null ? "–" : a > 0 ? `+${a}` : `−${Math.abs(a)}`);
+const signedPct = (x, d = 0) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x * 100).toFixed(d)}%`);
+const CHECK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3.5 8.5l3 3 6-7"/></svg>';
+
+// Best-paying side across a player's DraftKings lines: {line, side, price, ev, p}.
+function bestBet(player) {
+  let best = null;
+  for (const b of player.book || []) {
+    for (const side of ["over", "under"]) {
+      const ev = b[`ev_${side}`];
+      if (ev == null || b[side] == null) continue;
+      if (!best || ev > best.ev) {
+        best = { line: b.line, side, price: b[side], ev, p: side === "over" ? b.p_model : 1 - b.p_model };
+      }
+    }
+  }
+  return best;
+}
+function mainBook(player, line) {
+  const book = player.book || [];
+  return book.find((b) => b.line === line) || book[Math.floor(book.length / 2)] || null;
+}
+// "DK 5.5: O −120 / U +100" for the line shown (or the player's main DK line).
+function bookMetaAt(player, line) {
+  const b = mainBook(player, line);
+  return b ? ` · DK ${b.line}: O ${american(b.over)} / U ${american(b.under)}` : "";
+}
+function valueBadge(player) {
+  const bb = bestBet(player);
+  if (!bb || bb.ev < state.minEdge) return "";
+  return `<span class="badge">${CHECK}${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${american(bb.price)} · ${signedPct(bb.ev)}</span>`;
+}
+function oddsNote() {
+  const s = state.data?.odds_source;
+  if (!s || (s.error && s.error.startsWith("no ODDS_API_KEY"))) return "";
+  if (s.error === "no games today") return "";
+  const bits = [];
+  if (s.fetched_at) {
+    const mins = Math.round((Date.now() - Date.parse(s.fetched_at)) / 60000);
+    bits.push(`DraftKings props updated ${mins < 60 ? `${mins} min` : `${Math.round(mins / 60)} h`} ago for ${s.events_priced} of ${s.events_total} games.`);
+  } else {
+    bits.push("No DraftKings props downloaded yet today.");
+  }
+  if (s.daily_allowance != null) bits.push(`Budget ${s.spent_today}/${s.daily_allowance} credits today${s.credits_left != null ? `, ${s.credits_left} left this month` : ""}.`);
+  if (s.error) bits.push(esc(s.error));
+  return `<p class="note">${bits.join(" ")}</p>`;
+}
+function edgeControl() {
+  return `<div class="control-label"><span>Minimum edge</span><span>${pct(state.minEdge)}</span></div>
+    <div class="segmented">${EDGE_STEPS.map((e) => `<button data-edge="${e}" class="${e === state.minEdge ? "on" : ""}">${pct(e)}</button>`).join("")}</div>`;
+}
+function valuePicks() {
+  if (slate()?.label !== "Today") return "";
+  const all = [...allPitchers().map((p) => ({ ...p, kind: "pitcher" })), ...allBatters().map((b) => ({ ...b, kind: "batter" }))];
+  if (!all.some((p) => p.book?.length)) return oddsNote();
+  const picks = all.map((p) => ({ p, bb: bestBet(p) })).filter((x) => x.bb && x.bb.ev >= state.minEdge)
+    .sort((a, b) => b.bb.ev - a.bb.ev).slice(0, 12);
+  const rows = picks.map(({ p, bb }) => `
+    <button class="row-btn" data-player="${p.kind}" data-game="${p.game.game_pk}" data-id="${p.id}">
+      <span class="who"><b>${esc(p.name)}</b>
+        <span class="meta">${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${p.kind === "pitcher" ? "K" : "H+R+RBI"} · ${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))}</span></span>
+      <span class="vals"><b class="pos-text">${signedPct(bb.ev)}</b><small>${american(bb.price)} · model ${pct(bb.p)}</small></span>
+    </button>`).join("");
+  return `<h2 class="section-title">Value picks · DraftKings</h2>
+    ${edgeControl()}
+    ${picks.length ? `<div class="card list">${rows}</div>` : `<div class="card"><span class="muted">Nothing above a ${pct(state.minEdge)} edge right now.</span></div>`}
+    <p class="note">Edge = how much the model expects a $1 bet to return above your stake at DraftKings' price. Small edges are mostly noise; check Record before trusting them.</p>
+    ${oddsNote()}`;
+}
+function bookTable(player) {
+  if (!player.book?.length) return "";
+  const cell = (ev) => `<td class="${ev != null && ev >= state.minEdge ? "edge-pos" : ""}">${signedPct(ev)}</td>`;
+  const rows = player.book.map((b) => `<tr><td>${b.line}</td><td>${american(b.over)}<br><span class="muted small">${american(b.under)}</span></td><td>${pct(b.p_model)}</td><td>${pct(b.p_book)}</td>${cell(b.ev_over)}${cell(b.ev_under)}</tr>`).join("");
+  return `<h3 class="section-title">DraftKings</h3>
+    <table><thead><tr><th>Line</th><th>O / U</th><th>Model</th><th>DK</th><th>Edge O</th><th>Edge U</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="note">Model and DK = chance of the over; DK's is its price with the margin taken out.</p>`;
 }
 
 // ---------- data access ----------
@@ -208,6 +289,7 @@ function viewGames() {
   if (!slate()) return noGames();
   const games = slate().games;
   return `${daySwitch()}
+    ${valuePicks()}
     <h2 class="section-title">${games.length} game${games.length === 1 ? "" : "s"}</h2>
     ${games.map(gameCard).join("")}
     <p class="note">Tap a game for both lineups. Until a team posts its lineup, its last starting nine stands in.</p>`;
@@ -220,7 +302,7 @@ function batterRow(b, line, showTeam = true) {
   return `
     <button class="row-btn" data-player="batter" data-game="${b.game.game_pk}" data-id="${b.id}">
       <span class="who">${showTeam ? "" : `<span class="order">${b.order ?? ""}</span>`}<b>${esc(b.name)}</b>${b.confirmed ? "" : '<span class="tag">proj</span>'}
-        <span class="meta">${where}${b.order ? `bats ${ordinal(b.order)} · ` : ""}${vs}</span></span>
+        <span class="meta">${where}${b.order ? `bats ${ordinal(b.order)} · ` : ""}${vs}${bookMetaAt(b, line)}</span>${valueBadge(b)}</span>
       <span class="vals"><b>${pct(p)}</b><small>proj ${fix(b.mu)}</small></span>
       <span class="meter" aria-hidden="true"><span style="width:${(p * 100).toFixed(1)}%"></span></span>
     </button>`;
@@ -230,7 +312,7 @@ function pitcherRow(p, line) {
   return `
     <button class="row-btn" data-player="pitcher" data-game="${p.game.game_pk}" data-id="${p.id}">
       <span class="who"><b>${esc(p.name)}</b>
-        <span class="meta">${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)} · ${handName(p.hand)}</span></span>
+        <span class="meta">${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)} · ${handName(p.hand)}${bookMetaAt(p, null)}</span>${valueBadge(p)}</span>
       <span class="vals"><b>${fix(p.mu)} K</b><small>over ${line}: ${pct(po)}</small></span>
       <span class="meter" aria-hidden="true"><span style="width:${(po * 100).toFixed(1)}%"></span></span>
     </button>`;
@@ -279,7 +361,9 @@ function overTable(pmf, kind) {
     <p class="note">Fair = the model's chance as American odds, with no bookmaker margin. A bet is worth a look only when your sportsbook pays more than this.</p>`;
 }
 function playerSheet(kind, p) {
-  const line = state.sheetLine ?? (kind === "pitcher" ? state.pitLine : state.batLine);
+  const dk = mainBook(p, null);
+  const fallback = kind === "pitcher" ? state.pitLine : state.batLine;
+  const line = state.sheetLine ?? (dk && lines(kind).includes(dk.line) ? dk.line : fallback);
   const where = `${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)}`;
   const s = p.stats || {};
   const r1 = (x) => (x == null ? null : x.toFixed(1));
@@ -293,6 +377,7 @@ function playerSheet(kind, p) {
         <div class="hero"><b>${fix(p.mu)}</b><span>projected strikeouts</span></div>
         ${lineSwitch("pitcher", line, "data-sheet-line")}
         ${distChart(collapse(p.pmf, 13), line, "K")}
+        ${bookTable(p)}
         ${overTable(p.pmf, "pitcher")}
         <h3 class="section-title">Why</h3>
         ${statGrid([
@@ -314,6 +399,7 @@ function playerSheet(kind, p) {
       <div class="hero"><b>${fix(p.mu, 2)}</b><span>projected H+R+RBI</span></div>
       ${lineSwitch("batter", line, "data-sheet-line")}
       ${distChart(collapse(p.pmf, 7), line, "H+R+RBI")}
+      ${bookTable(p)}
       ${overTable(p.pmf, "batter")}
       <h3 class="section-title">Why</h3>
       ${statGrid([
@@ -430,6 +516,7 @@ document.addEventListener("click", (ev) => {
   else if (t.dataset.day) { state.day = Number(t.dataset.day); render(); }
   else if (t.dataset.batLine) { state.batLine = Number(t.dataset.batLine); store.set("batLine", state.batLine); render(); }
   else if (t.dataset.pitLine) { state.pitLine = Number(t.dataset.pitLine); store.set("pitLine", state.pitLine); render(); }
+  else if (t.dataset.edge) { state.minEdge = Number(t.dataset.edge); store.set("minEdge", state.minEdge); render(); }
   else if (t.dataset.rec) { state.recKind = t.dataset.rec; store.set("recKind", state.recKind); render(); }
   else if (t.dataset.sheetLine) {
     state.sheetLine = Number(t.dataset.sheetLine);

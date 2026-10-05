@@ -365,3 +365,18 @@ td.edge-pos { color: var(--good-text); font-weight: 600; }
 @media (min-width: 700px) {
   .tiles { grid-template-columns: repeat(4, 1fr); }
 }
+
+/* ---------- DraftKings ---------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--good-bg);
+  color: var(--good-text);
+}
+.badge svg { width: 13px; height: 13px; }

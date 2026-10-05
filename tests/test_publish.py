@@ -68,3 +68,45 @@ def test_publish_end_to_end(fake, tmp_path):
     # A second run is incremental and gives the same answer.
     again = publish.publish(tmp_path / "site", history_start=START, now=now)
     assert again["slates"][0]["games"][0]["pitchers"]["home"]["mu"] == pytest.approx(sp["mu"], rel=1e-3)
+
+
+class FakeDK:
+    """The Odds API for the fake upcoming game (Dogs @ Aces)."""
+
+    def __init__(self):
+        self.credits = 300
+
+    def get(self, url, params=None, timeout=None):
+        from test_odds import Resp
+        if url.endswith("/events"):
+            return Resp([{"id": "e1", "home_team": "Aces", "away_team": "Dogs",
+                          "commence_time": f"{TODAY}T23:05:00Z"}], self.credits, 0)
+        self.credits -= 2
+        line = lambda who, pt, o, u, key: {"key": key, "outcomes": [
+            {"name": "Over", "description": who, "price": o, "point": pt},
+            {"name": "Under", "description": who, "price": u, "point": pt}]}
+        return Resp({"id": "e1", "bookmakers": [{"key": "draftkings", "markets": [
+            line("P10151", 4.5, -110, -110, "pitcher_strikeouts"),
+            line("P10101", 1.5, 150, -190, "batter_hits_runs_rbis"),
+        ]}]}, self.credits, 2)
+
+
+def test_publish_with_draftkings(fake, tmp_path, monkeypatch):
+    from baseball_stats import odds
+    monkeypatch.setenv("ODDS_API_KEY", "k")
+    monkeypatch.setenv("ODDS_API_RESET_DAY", "1")
+    monkeypatch.setattr(odds.requests, "get", FakeDK().get)
+    data = publish.publish(tmp_path / "site", history_start=START,
+                           now=datetime(2025, 6, 15, 16, 0, tzinfo=UTC))
+    g = data["slates"][0]["games"][0]
+    sp = g["pitchers"]["home"]
+    assert sp["id"] == 10151 and sp["book"][0]["line"] == 4.5
+    b = sp["book"][0]
+    p_over = sum(sp["pmf"][5:])
+    assert b["p_model"] == pytest.approx(p_over, abs=1e-3)
+    assert b["ev_over"] == pytest.approx(p_over * (1 + 100 / 110) - 1, abs=1e-3)
+    assert b["p_book"] == pytest.approx(0.5)
+    hitter = next(x for x in g["lineups"]["home"] if x["id"] == 10101)
+    assert hitter["book"][0]["over"] == 150
+    assert data["odds_source"]["events_priced"] == 1 and data["odds_source"]["spent_today"] == 2
+    assert g["pitchers"]["away"]["book"] is None
