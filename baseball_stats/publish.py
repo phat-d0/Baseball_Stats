@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from . import collect, features, mlb_api, model, odds, slate, storage, tracking
+from . import collect, config, features, mlb_api, model, odds, pa_data, slate, storage, tracking
 
 log = logging.getLogger(__name__)
 
@@ -74,23 +74,51 @@ def update_data(today: date, history_start: date | None) -> None:
         collect.collect_games(start, end)
 
 
-def update_statcast(today: date, history_start: date | None) -> None:
-    """Fetch Statcast for days not yet stored. Failures only cost the Statcast features."""
+def statcast_days_missing(today: date, history_start: date | None) -> list[date]:
+    """Days with finished games but no plate appearances yet, newest first."""
     start = history_start or date(today.year - 2, 3, 1)
-    games = storage.read("games")
-    have = storage.read("statcast_pitcher")
-    if not have.empty and not games.empty:
-        dates = pd.to_datetime(games.loc[games["game_pk"].isin(have["game_pk"]), "game_date"])
-        if not dates.empty:
-            start = max(start, dates.max().date() + timedelta(days=1))
-    # Savant is slow (one request per day), so backfill at most this many days per run.
-    end = min(today - timedelta(days=1), start + timedelta(days=STATCAST_DAYS_PER_RUN - 1))
-    if start > end:
-        return
-    try:
-        collect.collect_statcast(start, end, game_type=mlb_api.ALL_GAME_TYPES)
-    except Exception as exc:  # Savant is slow/flaky at times; keep publishing without it
-        log.warning("statcast update failed (%s); continuing without new Statcast data", exc)
+    games = collect.played_games(storage.read("games"))
+    if games.empty:
+        return []
+    have = storage.read("plate_appearances")
+    if not have.empty:
+        games = games[~games["game_pk"].isin(have["game_pk"])]
+    days = sorted({d for d in pd.to_datetime(games["game_date"]).dt.date
+                   if start <= d < today}, reverse=True)
+    skip_path = config.PROCESSED_DIR / "statcast_empty_days.json"
+    skip = set(json.loads(skip_path.read_text())) if skip_path.exists() else set()
+    return [d for d in days if d.isoformat() not in skip]
+
+
+def update_statcast(today: date, history_start: date | None) -> dict | None:
+    """Fetch Statcast for days whose games have no plate appearances yet.
+
+    Newest days first (so yesterday is always covered), at most
+    ``STATCAST_DAYS_PER_RUN`` days a run since Savant takes one slow request per day.
+    Days Savant has nothing for are remembered and skipped. Failures only cost the
+    Statcast features. Returns the PA/box score reconciliation summary.
+    """
+    days = statcast_days_missing(today, history_start)[:STATCAST_DAYS_PER_RUN]
+    if days:
+        try:
+            empty = collect.collect_statcast_days(days, game_type=mlb_api.ALL_GAME_TYPES)
+        except Exception as exc:  # Savant is slow/flaky at times; keep publishing without it
+            log.warning("statcast update failed (%s); continuing without new Statcast data", exc)
+            empty = []
+        if empty:
+            skip_path = config.PROCESSED_DIR / "statcast_empty_days.json"
+            skip = set(json.loads(skip_path.read_text())) if skip_path.exists() else set()
+            skip |= {d.isoformat() for d in empty}
+            skip_path.write_text(json.dumps(sorted(skip)))
+    pa = storage.read("plate_appearances")
+    if pa.empty:
+        return None
+    check = pa_data.reconcile(pa, storage.read("batter_games"), storage.read("pitcher_games"))
+    (config.PROCESSED_DIR / "pa_reconcile.json").write_text(json.dumps(check, indent=1))
+    log.info("plate appearances: %d rows, %d games; reconciliation %s (%.1f%% games match, RBI gap %.1f%%)",
+             len(pa), check["games"], "passed" if check["passed"] else "FAILED",
+             100 * (check["match_share"] or 0), 100 * (check["rbi_gap"] or 0))
+    return check
 
 
 def find_slates(today: date, inputs: dict) -> list[tuple[date, dict]]:

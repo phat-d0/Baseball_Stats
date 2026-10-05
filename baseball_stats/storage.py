@@ -17,6 +17,7 @@ KEYS = {
     "players": ["player_id"],
     "statcast_batter": ["game_pk", "batter"],
     "statcast_pitcher": ["game_pk", "pitcher"],
+    "plate_appearances": ["game_pk", "at_bat_number"],
     # DraftKings price log (append-only) and its grades (rebuilt from the log each run).
     "prop_snapshots": ["game_pk", "player_id", "kind", "line", "fetched_at"],
     "prop_grades": ["game_pk", "player_id", "kind", "line", "fetched_at"],

@@ -26,6 +26,10 @@ COLUMNS = [
     "description", "events", "zone", "pitch_type", "release_speed",
     "launch_speed", "launch_angle", "launch_speed_angle",
     "estimated_woba_using_speedangle", "woba_value", "woba_denom",
+    # Plate-appearance context (checked against a real daily file, 2026-07-22).
+    "at_bat_number", "pitch_number", "inning", "inning_topbot", "outs_when_up",
+    "on_1b", "on_2b", "on_3b", "home_team", "away_team", "bat_score", "post_bat_score",
+    "n_thruorder_pitcher",
 ]
 
 

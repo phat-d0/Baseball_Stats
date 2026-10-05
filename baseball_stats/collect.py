@@ -7,7 +7,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from . import mlb_api, parse, statcast, storage
+from . import mlb_api, pa_data, parse, statcast, storage
 
 log = logging.getLogger(__name__)
 
@@ -133,12 +133,35 @@ def update_players(*frames: pd.DataFrame, extra_ids: list[int] | None = None) ->
     return storage.upsert("players", pd.DataFrame(rows))
 
 
+def store_statcast(pitches: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Per-game Statcast aggregates plus the plate appearance table, from pitch rows."""
+    if pitches.empty:
+        return {}
+    pa = pa_data.build(pitches, storage.read("batter_games"), storage.read("pitcher_games"))
+    return {
+        "statcast_batter": storage.upsert("statcast_batter", statcast.aggregate(pitches, "batter")),
+        "statcast_pitcher": storage.upsert("statcast_pitcher", statcast.aggregate(pitches, "pitcher")),
+        "plate_appearances": storage.upsert("plate_appearances", pa),
+    }
+
+
 def collect_statcast(start: date, end: date, *, game_type: str = mlb_api.ALL_GAME_TYPES) -> dict[str, pd.DataFrame]:
-    """Fetch pitch-level Statcast data and store per-game batter/pitcher aggregates."""
+    """Fetch pitch-level Statcast data; store per-game aggregates and plate appearances."""
     out = {}
     for s, e in _month_chunks(start, end):
         log.info("statcast %s..%s", s, e)
-        pitches = statcast.fetch_range(s, e, game_type=game_type)
-        out["statcast_batter"] = storage.upsert("statcast_batter", statcast.aggregate(pitches, "batter"))
-        out["statcast_pitcher"] = storage.upsert("statcast_pitcher", statcast.aggregate(pitches, "pitcher"))
+        out = store_statcast(statcast.fetch_range(s, e, game_type=game_type)) or out
     return out
+
+
+def collect_statcast_days(days: list[date], *, game_type: str = mlb_api.ALL_GAME_TYPES) -> list[date]:
+    """Fetch and store the given days; returns the days Savant had no pitches for."""
+    empty = []
+    for d in days:
+        pitches = statcast.fetch_day(d, game_type=game_type)
+        if pitches.empty:
+            empty.append(d)
+            continue
+        store_statcast(pitches)
+    log.info("statcast: %d days fetched, %d empty", len(days), len(empty))
+    return empty
