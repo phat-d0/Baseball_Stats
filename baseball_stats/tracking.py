@@ -269,6 +269,8 @@ def picks(grades: pd.DataFrame, threshold: float) -> pd.DataFrame:
             clv = None if pd.isna(r.clv_over) else (r.clv_over if side == "over" else -r.clv_over)
             rows.append({
                 "game_pk": r.game_pk, "player_id": r.player_id, "kind": r.kind,
+                "player_name": getattr(r, "player_name", None),
+                "game_start": getattr(r, "game_start", None), "actual": getattr(r, "actual", None),
                 "game_date": pd.Timestamp(r.game_date), "fetched_at": r.fetched_at,
                 "line": r.line, "side": side, "price": int(price), "ev": float(ev),
                 "p": float(r.p_model if side == "over" else 1 - r.p_model),
@@ -370,3 +372,73 @@ def summary(grades: pd.DataFrame, *, days: int | None = None) -> dict:
             }
         out[kind] = res
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Paper portfolio
+# --------------------------------------------------------------------------- #
+
+PAPER_STAKE = 10.0
+PAPER_EDGE = 0.12
+
+
+def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
+                 threshold: float = PAPER_EDGE) -> pd.DataFrame:
+    """Paper bets: $``stake`` on every value pick at or above ``threshold`` edge.
+
+    A trade is placed at the first logged DraftKings price whose best side clears the
+    threshold (one per player, game and prop), exactly as the Value picks list shows it:
+    hitters from projected lineups are skipped. The log is append-only and stores the
+    model's numbers at download time, so recorded trades never change afterwards.
+    """
+    if grades is None or grades.empty:
+        return pd.DataFrame()
+    g = grades
+    if "lineup_confirmed" in g:
+        g = g[(g["kind"] == "pitcher") | g["lineup_confirmed"].fillna(True).astype(bool)]
+    t = picks(g, threshold)
+    if t.empty:
+        return t
+    dec = t["price"].map(odds.american_to_decimal).astype(float)
+    t["stake"] = stake
+    t["profit"] = np.select(
+        [t["status"].eq("graded") & t["won"].eq(True), t["status"].eq("graded")],
+        [stake * (dec - 1), -stake], 0.0)
+    t.loc[t["status"].eq("pending"), "profit"] = np.nan
+    t["result"] = np.select(
+        [t["status"].eq("pending"), t["status"].eq("void"), t["won"].eq(True)],
+        ["open", "void", "won"], "lost")
+    return t.sort_values("fetched_at").reset_index(drop=True)
+
+
+def paper_portfolio(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
+                    threshold: float = PAPER_EDGE) -> dict:
+    """``paper`` in data.json: the paper trades, their totals and daily profit."""
+    t = paper_trades(grades, stake=stake, threshold=threshold)
+    base = {"stake": stake, "threshold": threshold}
+    if t.empty:
+        return {**base, "trades": [], "summary": {"n": 0}}
+    settled = t[t["result"].isin(["won", "lost"])]
+    staked = float(stake * len(settled))
+    profit = float(settled["profit"].sum())
+    daily = (settled.assign(day=pd.to_datetime(settled["game_date"]).dt.date)
+             .groupby("day")["profit"].sum().sort_index())
+    summary = {
+        "n": int(len(t)), "open": int((t["result"] == "open").sum()),
+        "won": int((t["result"] == "won").sum()), "lost": int((t["result"] == "lost").sum()),
+        "void": int((t["result"] == "void").sum()), "staked": staked, "profit": profit,
+        "roi": profit / staked if staked else None,
+        "at_risk": float(stake * (t["result"] == "open").sum()),
+        "first_trade": pd.Timestamp(t["fetched_at"].min()).isoformat(),
+        "avg_edge": float(t["ev"].mean()),
+        "clv": float(settled["clv"].dropna().astype(float).mean() * 100) if settled["clv"].notna().any() else None,
+    }
+    curve = [{"date": d.isoformat(), "profit": float(v), "cum": float(c)}
+             for (d, v), c in zip(daily.items(), daily.cumsum())]
+    cols = ["fetched_at", "game_date", "game_start", "game_pk", "player_id", "player_name", "kind",
+            "line", "side", "price", "ev", "p", "result", "actual", "profit", "clv", "stake"]
+    trades = t[[c for c in cols if c in t]].iloc[::-1]  # newest first
+    trades = trades.assign(fetched_at=trades["fetched_at"].astype(str),
+                           game_date=pd.to_datetime(trades["game_date"]).dt.date.astype(str),
+                           game_start=trades["game_start"].astype(str) if "game_start" in trades else None)
+    return {**base, "summary": summary, "curve": curve, "trades": trades.to_dict("records")}

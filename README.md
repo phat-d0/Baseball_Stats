@@ -56,6 +56,12 @@ edge size. Below 200 graded picks it's greyed out: that few is mostly luck.
 
 Refreshing the app on your phone never uses credits.
 
+**Paper Portfolio tab:** the app paper-trades its own picks: $10 on every DraftKings price
+with a model edge of 12% or more, at the first logged price that clears it (one trade per
+player and prop per game; hitters from projected lineups skipped). Trades are rebuilt each
+run from the append-only price log, settled from the box score (void = refunded), and shown
+with profit, return, win–loss record, money at risk and a profit-over-time chart.
+
 "Fair" odds are the model's probability written as American odds with no bookmaker margin:
 a bet is only worth a look when your sportsbook pays more than that.
 

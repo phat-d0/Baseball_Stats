@@ -514,8 +514,80 @@ function viewRecord() {
     <p class="note">"Season average" is the player's own ${unit} per game this season, the obvious guess without a model. "Over/under chances" scores the chance of going over every line (log loss); it's what matters for betting, and it can improve even when the average miss barely moves. The model retrains every run on all finished games; this check holds out the most recent ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days.</p>`;
 }
 
+// ---------- paper portfolio ----------
+const decimalOdds = (a) => (a > 0 ? 1 + a / 100 : 1 + 100 / Math.abs(a));
+const money = (x, d = 2) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}$${Math.abs(x).toFixed(d)}`);
+
+function profitChart(curve) {
+  if (!curve || curve.length < 2) return "";
+  const W = 320, H = 170, L = 40, R = 8, T = 10, B = 22;
+  const ys = curve.map((c) => c.cum);
+  const lo = Math.min(0, ...ys), hi = Math.max(0, ...ys);
+  const span = hi - lo || 1;
+  const sx = (i) => L + (i / (curve.length - 1)) * (W - L - R);
+  const sy = (v) => T + (1 - (v - lo) / span) * (H - T - B);
+  const ticks = [lo, (lo + hi) / 2, hi];
+  const grid = ticks.map((v) => `<line x1="${L}" x2="${W - R}" y1="${sy(v)}" y2="${sy(v)}"/><text x="${L - 4}" y="${sy(v) + 3}" text-anchor="end">${money(v, 0)}</text>`).join("");
+  const path = curve.map((c, i) => `${i ? "L" : "M"}${sx(i)},${sy(c.cum)}`).join(" ");
+  const hits = curve.map((c, i) => `<circle class="hit" cx="${sx(i)}" cy="${sy(c.cum)}" r="12" fill="transparent" data-tip="${esc(`${shortDate(c.date)}: ${money(c.profit)} · total ${money(c.cum)}`)}" data-x="${(sx(i) / W) * 100}"/>`).join("");
+  const last = curve.length - 1;
+  return `
+    <div class="chart">
+      <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cumulative paper profit by day">
+        <g class="grid">${grid}</g>
+        <line class="zero" x1="${L}" x2="${W - R}" y1="${sy(0)}" y2="${sy(0)}"/>
+        <path class="line" d="${path}"/>
+        <circle class="dot" cx="${sx(last)}" cy="${sy(curve[last].cum)}" r="4"/>
+        <text class="xlab" x="${L}" y="${H - 6}">${shortDate(curve[0].date)}</text>
+        <text class="xlab" x="${W - R}" y="${H - 6}" text-anchor="end">${shortDate(curve[last].date)}</text>
+        ${hits}
+      </svg>
+      <div class="tooltip" hidden></div>
+    </div>`;
+}
+
+function tradeRow(t) {
+  const what = `${t.side === "over" ? "Over" : "Under"} ${t.line} ${t.kind === "pitcher" ? "K" : "H+R+RBI"}`;
+  const placed = new Date(t.fetched_at);
+  const when = `${placed.toLocaleDateString([], { month: "short", day: "numeric" })} ${placed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+  const right = t.result === "open"
+    ? `<b>$${t.stake.toFixed(0)}</b><small>to win $${(t.stake * (decimalOdds(t.price) - 1)).toFixed(2)}</small>`
+    : `<b class="${t.result === "won" ? "pos-text" : t.result === "lost" ? "neg-text" : ""}">${t.result === "void" ? "void" : money(t.profit)}</b><small>${t.result === "void" ? "refunded" : t.result}${t.actual != null ? ` · actual ${t.actual}` : ""}</small>`;
+  return `
+    <div class="row-btn">
+      <span class="who"><b>${esc(t.player_name || "")}</b>
+        <span class="meta">${what} · ${american(t.price)} · edge ${signedPct(t.ev)}</span>
+        <span class="meta">Placed ${when}${t.clv != null ? ` · CLV ${t.clv >= 0 ? "+" : "−"}${Math.abs(t.clv * 100).toFixed(1)} pts` : ""}</span></span>
+      <span class="vals">${right}</span>
+    </div>`;
+}
+
+function viewPortfolio() {
+  const pp = state.data?.paper;
+  const rules = `<p class="note">Paper trading: $${pp?.stake ?? 10} on every DraftKings price at or above a ${pct(pp?.threshold ?? 0.12)} model edge, at the first price that clears it (one trade per player and prop per game). Hitters from projected lineups are skipped. Trades are recorded automatically every run and settled from the box score; void = refunded.</p>`;
+  if (!pp || !pp.summary?.n) {
+    return `<h2 class="section-title">Paper Portfolio</h2><div class="empty">No paper trades yet.<br><span class="muted">One is recorded the first time a DraftKings price shows a ${pct(pp?.threshold ?? 0.12)}+ edge.</span></div>${rules}`;
+  }
+  const s = pp.summary;
+  const open = pp.trades.filter((t) => t.result === "open");
+  const settled = pp.trades.filter((t) => t.result !== "open");
+  return `
+    <h2 class="section-title">Paper Portfolio</h2>
+    <div class="tiles">
+      <div class="tile"><div class="label">Profit</div><div class="value ${s.profit > 0 ? "pos-text" : s.profit < 0 ? "neg-text" : ""}">${money(s.profit)}</div><div class="sub">on $${s.staked.toFixed(0)} settled</div></div>
+      <div class="tile"><div class="label">Return</div><div class="value">${signedPct(s.roi, 1)}</div><div class="sub">avg edge ${pct(s.avg_edge, 0)} at placement</div></div>
+      <div class="tile"><div class="label">Record</div><div class="value">${s.won}–${s.lost}</div><div class="sub">${s.void} void${s.clv != null ? ` · CLV ${s.clv >= 0 ? "+" : "−"}${Math.abs(s.clv).toFixed(1)} pts` : ""}</div></div>
+      <div class="tile"><div class="label">Open</div><div class="value">${s.open}</div><div class="sub">$${s.at_risk.toFixed(0)} at risk</div></div>
+    </div>
+    ${pp.curve?.length > 1 ? `<h2 class="section-title">Profit over time</h2><div class="card">${profitChart(pp.curve)}</div>` : ""}
+    ${open.length ? `<h2 class="section-title">Open · ${open.length}</h2><div class="card list">${open.map(tradeRow).join("")}</div>` : ""}
+    ${settled.length ? `<h2 class="section-title">Settled · ${settled.length}</h2><div class="card list">${settled.slice(0, 100).map(tradeRow).join("")}</div>` : ""}
+    ${s.won + s.lost < 200 ? `<p class="note">Only ${s.won + s.lost} settled so far; until a few hundred, results are mostly luck.</p>` : ""}
+    ${rules}`;
+}
+
 // ---------- shell ----------
-const VIEWS = { games: viewGames, hitters: viewHitters, pitchers: viewPitchers, record: viewRecord };
+const VIEWS = { games: viewGames, hitters: viewHitters, pitchers: viewPitchers, portfolio: viewPortfolio, record: viewRecord };
 
 function render() {
   $("#view").innerHTML = VIEWS[state.tab]();

@@ -237,3 +237,51 @@ def test_market_summary_end_to_end(fake, dk, tmp_path):
 def test_no_key_market_empty(fake, tmp_path, monkeypatch):
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
     assert _publish(tmp_path, RUN1)["record"]["market"] == {}
+
+
+# ---- paper portfolio ----------------------------------------------------------
+
+def _paper_grades():
+    rows = []
+    def add(player, kind, over, ev_over, status, over_won, confirmed=True, minutes=120):
+        r = _snap(minutes, 5.5, over, -120, player=player, kind=kind)
+        r.update(ev_over=ev_over, ev_under=-0.3, p_model=0.6, status=status, over_won=over_won,
+                 lineup_confirmed=confirmed, clv_over=np.nan, close_line=np.nan, player_name=f"P{player}")
+        rows.append(r)
+    add(1, "pitcher", 150, 0.20, "graded", True)     # trade, won: +$15
+    add(2, "pitcher", -110, 0.13, "graded", False)   # trade, lost: -$10
+    add(3, "pitcher", 120, 0.10, "graded", True)     # below 12%: no trade
+    add(4, "batter", 140, 0.30, "graded", True, confirmed=False)  # projected lineup: skipped
+    add(5, "batter", 100, 0.12, "pending", None)     # trade, still open
+    add(6, "pitcher", 105, 0.25, "void", None)       # trade, void: $0
+    return pd.DataFrame(rows)
+
+
+def test_paper_trades_rules():
+    t = tracking.paper_trades(_paper_grades())
+    assert sorted(t["player_id"]) == [1, 2, 5, 6]
+    by = t.set_index("player_id")
+    assert by.loc[1, "profit"] == pytest.approx(15.0) and by.loc[1, "result"] == "won"
+    assert by.loc[2, "profit"] == pytest.approx(-10.0) and by.loc[2, "result"] == "lost"
+    assert np.isnan(by.loc[5, "profit"]) and by.loc[5, "result"] == "open"
+    assert by.loc[6, "profit"] == 0 and by.loc[6, "result"] == "void"
+    s = tracking.paper_portfolio(_paper_grades())["summary"]
+    assert (s["n"], s["won"], s["lost"], s["open"], s["void"]) == (4, 1, 1, 1, 1)
+    assert s["staked"] == 20 and s["profit"] == pytest.approx(5.0) and s["roi"] == pytest.approx(0.25)
+    assert s["at_risk"] == 10
+
+
+def test_paper_portfolio_end_to_end(fake, dk, tmp_path):
+    data = _publish(tmp_path, RUN1)
+    paper = data["paper"]
+    assert paper["stake"] == 10 and paper["threshold"] == 0.12
+    assert all(t["ev"] >= 0.12 and t["result"] == "open" for t in paper["trades"])
+    _finish_game(k=7, hrr=1)
+    paper = _publish(tmp_path, datetime(2025, 6, 16, 16, 0, tzinfo=UTC))["paper"]
+    for t in paper["trades"]:
+        dec = odds.american_to_decimal(t["price"])
+        assert t["result"] in ("won", "lost")
+        assert t["profit"] == pytest.approx(10 * (dec - 1) if t["result"] == "won" else -10)
+    if paper["trades"]:
+        assert paper["summary"]["profit"] == pytest.approx(sum(t["profit"] for t in paper["trades"]))
+        assert paper["curve"][-1]["cum"] == pytest.approx(paper["summary"]["profit"])

@@ -237,10 +237,6 @@ def publish(out: str | Path, *, history_start: date | None = None,
     update_data(today, history_start)
     if statcast:
         update_statcast(today, history_start)
-    grades = tracking.update_grades()
-    market = tracking.summary(grades)
-    if not grades.empty:
-        log.info("price log grades: %s", grades["status"].value_counts().to_dict())
 
     inputs = features.load_inputs()
     slates = find_slates(today, inputs)
@@ -289,6 +285,14 @@ def publish(out: str | Path, *, history_start: date | None = None,
         added = tracking.log_snapshots(s, models, props, now)
         log.info("price log: %d new snapshot rows", len(added))
 
+    # Grade the full log (including prices logged just now) and build the paper portfolio.
+    grades = tracking.update_grades()
+    market = tracking.summary(grades)
+    paper = tracking.paper_portfolio(grades)
+    if not grades.empty:
+        log.info("price log grades: %s; paper trades: %s", grades["status"].value_counts().to_dict(),
+                 {k: paper["summary"].get(k) for k in ("n", "open", "won", "lost", "profit")})
+
     stored = storage.read("games")
     final = stored[stored["status"] == "Final"] if not stored.empty else stored
     data = {
@@ -302,6 +306,7 @@ def publish(out: str | Path, *, history_start: date | None = None,
                    for d, s in slates],
         "odds_source": asdict(odds_status),
         "record": {**record, "market": market},
+        "paper": paper,
     }
     data = _clean(data)
 
