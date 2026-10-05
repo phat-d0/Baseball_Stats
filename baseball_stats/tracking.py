@@ -117,3 +117,114 @@ def log_snapshots(slate: dict, models: dict[str, model.CountModel], props: dict,
     if not new.empty:
         storage.upsert("prop_snapshots", new, base)
     return new.reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Grading
+# --------------------------------------------------------------------------- #
+
+CLOSE_MAX_MINUTES = 90  # a "closing" price must be taken this close to first pitch
+NOT_PLAYED = {"Postponed", "Cancelled"}
+
+
+def void_reason(kind: str, game: dict | None, box: dict | None, line: float,
+                actual: float | None, game_date) -> str | None:
+    """Why a snapshot can't be graded as a bet (None = it stands).
+
+    One small function on purpose: sportsbooks differ on edge cases (e.g. whether a
+    batter must start or only get a plate appearance), so check DraftKings' current
+    house rules before trusting these.
+    """
+    if game is None:
+        return None  # not known yet -> pending, handled by the caller
+    if game.get("detailed_state") in NOT_PLAYED:
+        return "not played"
+    if pd.Timestamp(game.get("game_date")).normalize() != pd.Timestamp(game_date).normalize():
+        return "played on another day"  # postponed and replayed under the same game_pk
+    if box is None:
+        return "no box score"
+    if not bool(box.get("is_starter")):
+        return "did not start"
+    if actual is not None and float(line).is_integer() and actual == line:
+        return "push"
+    return None
+
+
+def grade(snapshots: pd.DataFrame, games: pd.DataFrame, batter_games: pd.DataFrame,
+          pitcher_games: pd.DataFrame) -> pd.DataFrame:
+    """``prop_grades``: every snapshot with its result and closing-line comparison."""
+    if snapshots.empty:
+        return pd.DataFrame()
+    s = snapshots.copy()
+    s["fetched_at"] = pd.to_datetime(s["fetched_at"], utc=True)
+    s["game_start"] = pd.to_datetime(s["game_start"], utc=True)
+    g = games.drop_duplicates("game_pk").set_index("game_pk") if not games.empty else pd.DataFrame()
+    boxes = {
+        "batter": batter_games.drop_duplicates(["game_pk", "player_id"]).set_index(["game_pk", "player_id"])
+        if not batter_games.empty else pd.DataFrame(),
+        "pitcher": pitcher_games.drop_duplicates(["game_pk", "player_id"]).set_index(["game_pk", "player_id"])
+        if not pitcher_games.empty else pd.DataFrame(),
+    }
+    stat = {"batter": "hrr", "pitcher": "k"}
+
+    status, actual, reason = [], [], []
+    for r in s.itertuples(index=False):
+        game = g.loc[r.game_pk].to_dict() if r.game_pk in g.index else None
+        finished = (game is not None and game.get("status") == "Final"
+                    and game.get("detailed_state") != "Suspended")
+        if game is not None and game.get("detailed_state") in NOT_PLAYED:
+            finished = True
+        if not finished:
+            status.append("pending"); actual.append(None); reason.append(None)
+            continue
+        b = boxes[r.kind]
+        key = (r.game_pk, r.player_id)
+        box = b.loc[key].to_dict() if not b.empty and key in b.index else None
+        a = float(box[stat[r.kind]]) if box is not None and pd.notna(box.get(stat[r.kind])) else None
+        why = void_reason(r.kind, game, box, r.line, a, r.game_date)
+        status.append("void" if why else "graded")
+        actual.append(a if not why else None)
+        reason.append(why)
+    s["status"] = status
+    s["actual"] = pd.array([None if x is None else int(x) for x in actual], dtype="Int64")
+    s["void_reason"] = reason
+    s["over_won"] = pd.array([None if x is None else bool(x > ln) for x, ln in zip(actual, s["line"])],
+                             dtype="boolean")
+    s["hours_before"] = (s["game_start"] - s["fetched_at"]) / pd.Timedelta(hours=1)
+    return _closing(s)
+
+
+def _closing(s: pd.DataFrame) -> pd.DataFrame:
+    """Mark each player's closing snapshot and compare every earlier price with it."""
+    s = s.copy()
+    s["is_close"] = False
+    s["close_line"] = np.nan
+    s["p_book_close"] = np.nan
+    s["clv_over"] = np.nan
+    before = s[s["fetched_at"] <= s["game_start"]]
+    for _, grp in before.groupby(["game_pk", "player_id", "kind"]):
+        t_close = grp["fetched_at"].max()
+        close = grp[grp["fetched_at"] == t_close]
+        s.loc[close.index, "is_close"] = True
+        start = grp["game_start"].iloc[0]
+        if (start - t_close) > pd.Timedelta(minutes=CLOSE_MAX_MINUTES):
+            continue  # too early to count as a closing price
+        close_lines = close.set_index("line")["p_book"]
+        for i, row in grp[grp["fetched_at"] < t_close].iterrows():
+            nearest = min(close_lines.index, key=lambda ln: (abs(ln - row["line"]), ln))
+            s.at[i, "close_line"] = nearest
+            if nearest == row["line"] and pd.notna(close_lines[nearest]) and pd.notna(row["p_book"]):
+                s.at[i, "p_book_close"] = close_lines[nearest]
+                s.at[i, "clv_over"] = close_lines[nearest] - row["p_book"]
+    return s
+
+
+def update_grades(base=None) -> pd.DataFrame:
+    """Rebuild ``prop_grades`` from the full log and the stored box scores."""
+    snaps = storage.read("prop_snapshots", base)
+    grades = grade(snaps, storage.read("games", base), storage.read("batter_games", base),
+                   storage.read("pitcher_games", base))
+    if not grades.empty:
+        path = storage.table_path("prop_grades", base)
+        storage.write(grades, path)  # derived: replaced in full, never merged
+    return grades

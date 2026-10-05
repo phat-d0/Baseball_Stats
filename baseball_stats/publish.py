@@ -209,6 +209,9 @@ def publish(out: str | Path, *, history_start: date | None = None,
     update_data(today, history_start)
     if statcast:
         update_statcast(today, history_start)
+    grades = tracking.update_grades()
+    if not grades.empty:
+        log.info("price log grades: %s", grades["status"].value_counts().to_dict())
 
     inputs = features.load_inputs()
     slates = find_slates(today, inputs)
