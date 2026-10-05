@@ -1,0 +1,67 @@
+# Rebuilds the phone app (data + models + today's projections) and publishes it to GitHub Pages.
+# One-time setup: repo Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+name: Publish app
+
+on:
+  schedule:
+    # Every hour, plus every 20 minutes from 15:00 to 01:59 UTC (11am-10pm US Eastern),
+    # when probable starters change and lineups get posted. GitHub may start scheduled
+    # runs a few minutes late.
+    - cron: "7 * * * *"
+    - cron: "27,47 15-23,0-1 * * *"
+  workflow_dispatch: # "Run workflow" button in the Actions tab
+  push:
+    paths: ["baseball_stats/**", "web/**", "requirements.txt", ".github/workflows/publish.yml"]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Queue rather than cancel: the very first run backfills two seasons and takes a while.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Pushes only publish from the default branch (schedules always run there).
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Finished games never change: keep the processed tables between runs so each run
+      # only downloads games played since the last one.
+      - uses: actions/cache@v4
+        with:
+          path: data/processed
+          key: processed-${{ github.run_id }}
+          restore-keys: processed-
+
+      - name: Build site
+        env:
+          BASEBALL_REQUEST_DELAY: "0.1"
+        run: |
+          pip install -r requirements.txt
+          python -m baseball_stats publish --out _site --statcast
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

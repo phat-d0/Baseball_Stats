@@ -7,13 +7,15 @@ from datetime import date
 from . import config
 from .http import get_json
 
-SCHEDULE_HYDRATE = "probablePitcher,venue,weather,lineups,officials"
+SCHEDULE_HYDRATE = "team,probablePitcher,venue,weather,lineups,officials"
+# Regular season plus every postseason round (wild card, division, LCS, World Series).
+ALL_GAME_TYPES = "R,F,D,L,W"
 
 
 def schedule(start: date, end: date, *, game_type: str = "R", cache: bool = True) -> dict:
     """Schedule for a date range, hydrated with probables, lineups and weather.
 
-    ``game_type``: R regular season, P postseason, S spring training ("R,P" for both).
+    ``game_type``: comma-separated codes: R regular season, F/D/L/W postseason rounds.
     Pass ``cache=False`` for today/future dates, where probables and lineups change.
     """
     return get_json(

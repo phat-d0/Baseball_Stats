@@ -11,6 +11,44 @@ model-ready feature tables. Every feature on a row is computed **only from games
 on earlier dates**, so the training data matches what you would know before
 first pitch.
 
+## iPhone app
+
+A phone-first web app you add to your home screen. It opens full-screen with its own
+icon, works offline, and follows your phone's dark mode. Tabs:
+
+- **Games**: today's (and the next day's) games with both probable starters' projected
+  strikeouts. Tap a game for both lineups with each hitter's H+R+RBI chances.
+- **Hitters**: every batter in today's lineups ranked by chance of going over 0.5 / 1.5 / 2.5
+  H+R+RBI. Tap one for the full distribution, fair odds for each line and the stats behind it.
+- **Pitchers**: starters ranked by projected strikeouts, with the chance of going over
+  3.5–7.5. Tap one for the distribution, fair odds and why (recent form, opposing lineup's
+  strikeout rate, umpire, park).
+- **Record**: how the model did over the most recent 30 days it wasn't trained on: average
+  miss vs the player's season average, the daily top-10 picks' hit rate, and a calibration
+  chart showing whether "70%" really happens about 70% of the time.
+
+"Fair" odds are the model's probability written as American odds with no bookmaker margin:
+a bet is only worth a look when your sportsbook pays more than that.
+
+Until a team posts its lineup (usually 1–4 hours before first pitch), its last starting
+nine stands in, marked **proj**.
+
+A GitHub Actions job (`.github/workflows/publish.yml`) runs every hour, and every 20 minutes
+from 11am to 10pm US Eastern. Each run fetches newly finished games, retrains both models,
+scores the next slate and publishes to GitHub Pages.
+
+**One-time setup**
+1. On GitHub: repo **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+2. **Actions** tab → *Publish app* → **Run workflow** (or wait for the next scheduled run).
+   The first run downloads two seasons of box scores and takes roughly an hour. Later runs
+   take a few minutes. Statcast history fills in 45 days per run over the next day or so.
+3. On your iPhone, open `https://phat-d0.github.io/Baseball_Stats/` in **Safari**, tap
+   **Share → Add to Home Screen**.
+
+Build it locally: `python -m baseball_stats publish --out _site && python -m http.server -d _site`.
+The app code lives in `web/`; `baseball_stats/publish.py` writes the `data.json` it reads.
+Icons are drawn by `scripts/make_icons.py`.
+
 ## Setup
 
 ```bash
@@ -21,7 +59,7 @@ pip install -r requirements-dev.txt
 ## Usage
 
 ```bash
-# 1. Download historical games (box scores, lineups, umpires, weather).
+# 1. Download historical games (regular season + postseason by default) (box scores, lineups, umpires, weather).
 #    Raw responses are cached under data/raw/, so re-runs are cheap.
 python -m baseball_stats collect --start 2023-03-30 --end 2025-09-28
 
@@ -32,7 +70,10 @@ python -m baseball_stats collect --start 2023-03-30 --end 2025-09-28 --statcast
 # 2. Build training tables -> data/features/{batter_hrr,pitcher_k}.parquet
 python -m baseball_stats features
 
-# 3. Build feature rows for today's games, to feed a trained model
+# 3. Or do everything the phone app needs in one go (collect, train, score, write site)
+python -m baseball_stats publish --out _site --statcast
+
+# 4. Build feature rows for today's games, to feed a trained model
 #    -> data/features/slates/{batter_hrr,pitcher_k}_<date>.parquet
 python -m baseball_stats slate --date 2026-04-15
 ```
@@ -82,6 +123,13 @@ pick them up.
 
 Early-season and debut rows have NaN for windows with no history. Tree models such as
 LightGBM/XGBoost handle that natively; for linear models, impute or use the `_shr` columns.
+
+## Models
+
+`baseball_stats/model.py` fits a gradient-boosted Poisson regression (scikit-learn) for each
+target to predict the average. Real outcomes are more spread out than Poisson, so each
+prediction becomes a negative binomial distribution whose extra spread is fitted on recent
+held-out games. That distribution gives the chance of going over any line.
 
 ## Modelling notes
 

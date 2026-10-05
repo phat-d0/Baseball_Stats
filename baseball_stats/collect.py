@@ -30,8 +30,13 @@ def played_games(games: pd.DataFrame) -> pd.DataFrame:
     return games[mask]
 
 
-def collect_games(start: date, end: date, *, game_type: str = "R") -> dict[str, pd.DataFrame]:
-    """Fetch schedule + boxscores for finished games in [start, end] and upsert them."""
+def collect_games(start: date, end: date, *, game_type: str = "R",
+                  skip_existing: bool = True) -> dict[str, pd.DataFrame]:
+    """Fetch schedule + boxscores for finished games in [start, end] and upsert them.
+
+    With ``skip_existing`` (default), box scores already in ``batter_games`` aren't
+    downloaded again, so a daily run only fetches the new games.
+    """
     game_rows, lineup_rows = [], []
     today = date.today()
     for s, e in _month_chunks(start, end):
@@ -46,6 +51,10 @@ def collect_games(start: date, end: date, *, game_type: str = "R") -> dict[str, 
         return {}
 
     done = played_games(games)
+    if skip_existing:
+        stored = storage.read("batter_games")
+        if not stored.empty:
+            done = done[~done["game_pk"].isin(stored["game_pk"])]
     batters, pitchers, extras = [], [], []
     for i, pk in enumerate(done["game_pk"], start=1):
         if i % 100 == 0:
@@ -63,6 +72,12 @@ def collect_games(start: date, end: date, *, game_type: str = "R") -> dict[str, 
             g.loc[ex.index, col] = ex[col].where(ex[col].notna(), g.loc[ex.index, col])
         games = g.reset_index()
 
+    # Never let a stale schedule copy (e.g. "Scheduled") overwrite a stored final game.
+    stored_games = storage.read("games")
+    if not stored_games.empty and "status" in stored_games:
+        final_before = set(stored_games.loc[stored_games["status"] == "Final", "game_pk"])
+        games = games[(games["status"] == "Final") | ~games["game_pk"].isin(final_before)]
+
     meta = games[["game_pk", "game_date", "season", "venue_id"]]
     bat_df = pd.DataFrame(batters)
     pit_df = pd.DataFrame(pitchers)
@@ -78,7 +93,7 @@ def collect_games(start: date, end: date, *, game_type: str = "R") -> dict[str, 
         "pitcher_games": storage.upsert("pitcher_games", pit_df),
     }
     out["players"] = update_players(out["batter_games"], out["pitcher_games"])
-    log.info("stored %d games, %d batter rows, %d pitcher rows",
+    log.info("stored %d new games, %d batter rows, %d pitcher rows",
              len(done), len(bat_df), len(pit_df))
     return out
 

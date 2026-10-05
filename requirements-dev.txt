@@ -1,2 +1,3 @@
 -r requirements.txt
 pytest>=8
+pillow>=10  # only for scripts/make_icons.py

@@ -1,0 +1,477 @@
+"use strict";
+
+// ---------- state ----------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
+};
+const state = {
+  data: null,
+  tab: "games", // the app always opens on today's games
+  day: 0, // index into data.slates
+  batLine: store.get("batLine", 1.5),
+  pitLine: store.get("pitLine", 5.5),
+  recKind: store.get("recKind", "batter"),
+  query: "",
+  sheetLine: null, // line picked inside an open player sheet
+  sheetPlayer: null,
+};
+
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const pct = (x, d = 0) => (x == null ? "–" : `${(x * 100).toFixed(d)}%`);
+const fix = (x, d = 1) => (x == null ? "–" : x.toFixed(d));
+const ordinal = (n) => `${n}${["th", "st", "nd", "rd"][(n % 100 > 10 && n % 100 < 14) || n % 10 > 3 ? 0 : n % 10]}`;
+const handName = (h) => ({ L: "LHP", R: "RHP" })[h] || "";
+const batsName = (h) => ({ L: "bats L", R: "bats R", S: "switch" })[h] || "";
+
+// P(over line) from a pmf whose last entry is the "or more" tail.
+const pOver = (pmf, line) => pmf.slice(Math.floor(line) + 1).reduce((a, b) => a + b, 0);
+
+// Keep the first n-1 counts and fold the rest into an "n-1 or more" bar.
+const collapse = (pmf, n) => pmf.slice(0, n - 1).concat([pmf.slice(n - 1).reduce((a, b) => a + b, 0)]);
+
+// Fair (no-vig) American odds for a probability: compare with your sportsbook's price.
+function fairOdds(p) {
+  if (p == null || p <= 0 || p >= 1) return "–";
+  const a = p >= 0.5 ? Math.round((-100 * p) / (1 - p)) : Math.round((100 * (1 - p)) / p);
+  return a > 0 ? `+${a}` : `−${Math.abs(a)}`;
+}
+
+function gameTime(iso) {
+  if (!iso) return "TBD";
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+// ---------- data access ----------
+const slates = () => state.data?.slates || [];
+const slate = () => slates()[Math.min(state.day, Math.max(slates().length - 1, 0))];
+const lines = (kind) => state.data?.lines?.[kind] || (kind === "batter" ? [0.5, 1.5, 2.5] : [3.5, 4.5, 5.5, 6.5, 7.5]);
+const teamAbbr = (t) => t?.abbr || t?.name || "";
+
+function allPitchers() {
+  const out = [];
+  for (const g of slate()?.games || []) {
+    for (const side of ["away", "home"]) {
+      const p = g.pitchers[side];
+      if (p) out.push({ ...p, game: g, side, team: g[side], opp: g[side === "home" ? "away" : "home"] });
+    }
+  }
+  return out;
+}
+function allBatters() {
+  const out = [];
+  for (const g of slate()?.games || []) {
+    for (const side of ["away", "home"]) {
+      const oppSide = side === "home" ? "away" : "home";
+      for (const b of g.lineups[side]) {
+        out.push({ ...b, game: g, side, team: g[side], opp: g[oppSide], oppSp: g.pitchers[oppSide] });
+      }
+    }
+  }
+  return out;
+}
+function findPlayer(kind, gamePk, id) {
+  const list = kind === "pitcher" ? allPitchers() : allBatters();
+  return list.find((p) => p.game.game_pk === gamePk && p.id === id);
+}
+
+// ---------- shared controls ----------
+function daySwitch() {
+  if (slates().length < 2) return slate() ? `<p class="note">${esc(slate().label)} · ${esc(longDate(slate().date))}</p>` : "";
+  return `<div class="segmented" role="tablist" aria-label="Day">${slates()
+    .map((s, i) => `<button data-day="${i}" class="${i === state.day ? "on" : ""}" role="tab" aria-selected="${i === state.day}">${esc(s.label)}</button>`)
+    .join("")}</div>`;
+}
+function lineSwitch(kind, current, attr) {
+  return `<div class="segmented" aria-label="Line">${lines(kind)
+    .map((l) => `<button ${attr}="${l}" class="${l === current ? "on" : ""}">Over ${l}</button>`)
+    .join("")}</div>`;
+}
+function longDate(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+}
+function shortDate(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+function noGames() {
+  return `<div class="empty">No games scheduled in the next week.<br><span class="muted">The Record tab still shows how the model did.</span></div>`;
+}
+
+// ---------- charts ----------
+// Bars for P(exactly k); bars above the line are highlighted.
+function distChart(pmf, line, unit) {
+  const n = pmf.length;
+  const W = 340, H = 130, top = 16, bottom = 18, gap = 2;
+  const bw = (W - gap * (n - 1)) / n;
+  const max = Math.max(...pmf, 0.01);
+  let bars = "";
+  pmf.forEach((p, k) => {
+    const h = ((H - top - bottom) * p) / max;
+    const x = k * (bw + gap);
+    const y = H - bottom - h;
+    const over = k > line;
+    const lab = k === n - 1 ? `${k}+` : `${k}`;
+    const r = Math.min(4, bw / 2, h);
+    const path = h > 0
+      ? `M${x},${H - bottom} V${y + r} Q${x},${y} ${x + r},${y} H${x + bw - r} Q${x + bw},${y} ${x + bw},${y + r} V${H - bottom} Z`
+      : "";
+    bars += `<path class="bar ${over ? "over" : ""}" d="${path}"/>`;
+    if (p >= 0.04) bars += `<text class="val" x="${x + bw / 2}" y="${y - 4}">${Math.round(p * 100)}</text>`;
+    bars += `<text class="lbl" x="${x + bw / 2}" y="${H - 4}">${lab}</text>`;
+    bars += `<rect class="hit" x="${x - gap / 2}" y="0" width="${bw + gap}" height="${H}" data-tip="${esc(`${lab} ${unit}: ${(p * 100).toFixed(1)}%`)}" data-x="${((x + bw / 2) / W) * 100}"/>`;
+  });
+  return `
+    <div class="chart dist">
+      <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Chance of each ${esc(unit)} total">${bars}</svg>
+      <div class="tooltip" hidden></div>
+    </div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>Over ${line}</span><span><i style="background:var(--track)"></i>Under</span><span class="muted">Bar labels are %</span></div>`;
+}
+
+// Predicted probability vs how often it happened. On the dashed line = well calibrated.
+function calibrationChart(points) {
+  const W = 320, H = 220, L = 30, R = 8, T = 8, B = 26;
+  const sx = (v) => L + v * (W - L - R);
+  const sy = (v) => T + (1 - v) * (H - T - B);
+  let grid = "";
+  for (const v of [0, 0.25, 0.5, 0.75, 1]) {
+    grid += `<line x1="${L}" x2="${W - R}" y1="${sy(v)}" y2="${sy(v)}"/><text x="${L - 4}" y="${sy(v) + 3}" text-anchor="end">${v * 100}</text>`;
+    grid += `<text x="${sx(v)}" y="${H - 8}" text-anchor="middle">${v * 100}</text>`;
+  }
+  const maxN = Math.max(...points.map((p) => p.n), 1);
+  const path = points.map((p, i) => `${i ? "L" : "M"}${sx(p.p)},${sy(p.actual)}`).join(" ");
+  const dots = points.map((p) => {
+    const r = 4 + 4 * Math.sqrt(p.n / maxN);
+    return `<circle class="dot" cx="${sx(p.p)}" cy="${sy(p.actual)}" r="${r}"/>` +
+      `<circle class="hit" cx="${sx(p.p)}" cy="${sy(p.actual)}" r="${r + 10}" fill="transparent" data-tip="${esc(`Model ${pct(p.p)} → happened ${pct(p.actual)} (${p.n.toLocaleString()} picks)`)}" data-x="${(sx(p.p) / W) * 100}"/>`;
+  }).join("");
+  return `
+    <div class="chart">
+      <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Calibration: predicted chance against actual frequency">
+        <g class="grid">${grid}</g>
+        <line class="diag" x1="${sx(0)}" y1="${sy(0)}" x2="${sx(1)}" y2="${sy(1)}"/>
+        <path class="line" d="${path}"/>
+        ${dots}
+      </svg>
+      <div class="tooltip" hidden></div>
+    </div>
+    <p class="note">Across: the model's chance of going over (%). Up: how often it actually went over (%). Dots on the dashed line mean the chances can be taken at face value; bigger dots = more picks.</p>`;
+}
+
+function bindCharts(root = document) {
+  root.querySelectorAll(".chart").forEach((chart) => {
+    const tip = $(".tooltip", chart);
+    if (!tip) return;
+    const show = (ev) => {
+      const t = ev.target.closest("[data-tip]");
+      if (!t) { tip.hidden = true; return; }
+      tip.textContent = t.dataset.tip;
+      tip.style.left = `${Math.min(Math.max(Number(t.dataset.x), 18), 82)}%`;
+      tip.hidden = false;
+    };
+    chart.addEventListener("pointermove", show);
+    chart.addEventListener("pointerdown", show);
+    chart.addEventListener("pointerleave", () => { tip.hidden = true; });
+  });
+}
+
+// ---------- games ----------
+function pitcherCell(p) {
+  if (!p) return `<div class="kproj"><span class="muted small">Starter TBD</span></div>`;
+  return `<div class="kproj"><b>${fix(p.mu)}</b><small>proj K</small></div>`;
+}
+function gameCard(g) {
+  const conf = (side) => g.lineups[side].length && g.lineups[side].every((b) => b.confirmed);
+  const lineupChip = (side) => {
+    if (!g.lineups[side].length) return "";
+    return conf(side)
+      ? `<span class="chip ok">${esc(teamAbbr(g[side]))} lineup posted</span>`
+      : `<span class="chip">${esc(teamAbbr(g[side]))} lineup projected</span>`;
+  };
+  const weather = [g.temp_f != null ? `${Math.round(g.temp_f)}°F` : "", g.wind || ""].filter(Boolean).join(", ");
+  const sp = (side) => g.pitchers[side] ? `${esc(g.pitchers[side].name)} <span class="muted">${handName(g.pitchers[side].hand)}</span>` : "TBD";
+  return `
+    <button class="card game" data-game="${g.game_pk}">
+      <div class="game-head"><span>${gameTime(g.time)}${g.venue ? ` · ${esc(g.venue)}` : ""}</span><span>${esc(weather)}</span></div>
+      <div class="matchup">
+        <div class="team-line"><b>${esc(g.away.name)}</b><span>${sp("away")}</span></div>${pitcherCell(g.pitchers.away)}
+        <div class="team-line"><b>@ ${esc(g.home.name)}</b><span>${sp("home")}</span></div>${pitcherCell(g.pitchers.home)}
+      </div>
+      <div class="chips">${lineupChip("away")}${lineupChip("home")}</div>
+    </button>`;
+}
+function viewGames() {
+  if (!slate()) return noGames();
+  const games = slate().games;
+  return `${daySwitch()}
+    <h2 class="section-title">${games.length} game${games.length === 1 ? "" : "s"}</h2>
+    ${games.map(gameCard).join("")}
+    <p class="note">Tap a game for both lineups. Until a team posts its lineup, its last starting nine stands in.</p>`;
+}
+
+function batterRow(b, line, showTeam = true) {
+  const p = pOver(b.pmf, line);
+  const where = showTeam ? `${esc(teamAbbr(b.team))} ${b.side === "home" ? "vs" : "@"} ${esc(teamAbbr(b.opp))} · ` : "";
+  const vs = b.oppSp ? `vs ${esc(b.oppSp.name)} (${b.oppSp.hand || "?"})` : "starter TBD";
+  return `
+    <button class="row-btn" data-player="batter" data-game="${b.game.game_pk}" data-id="${b.id}">
+      <span class="who">${showTeam ? "" : `<span class="order">${b.order ?? ""}</span>`}<b>${esc(b.name)}</b>${b.confirmed ? "" : '<span class="tag">proj</span>'}
+        <span class="meta">${where}${b.order ? `bats ${ordinal(b.order)} · ` : ""}${vs}</span></span>
+      <span class="vals"><b>${pct(p)}</b><small>proj ${fix(b.mu)}</small></span>
+      <span class="meter" aria-hidden="true"><span style="width:${(p * 100).toFixed(1)}%"></span></span>
+    </button>`;
+}
+function pitcherRow(p, line) {
+  const po = pOver(p.pmf, line);
+  return `
+    <button class="row-btn" data-player="pitcher" data-game="${p.game.game_pk}" data-id="${p.id}">
+      <span class="who"><b>${esc(p.name)}</b>
+        <span class="meta">${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)} · ${handName(p.hand)}</span></span>
+      <span class="vals"><b>${fix(p.mu)} K</b><small>over ${line}: ${pct(po)}</small></span>
+      <span class="meter" aria-hidden="true"><span style="width:${(po * 100).toFixed(1)}%"></span></span>
+    </button>`;
+}
+
+function gameSheet(g) {
+  const line = state.batLine;
+  const lineup = (side) => {
+    const bs = g.lineups[side];
+    const oppSide = side === "home" ? "away" : "home";
+    if (!bs.length) return `<p class="note">No lineup yet.</p>`;
+    const rows = bs.map((b) => batterRow({ ...b, game: g, side, team: g[side], opp: g[oppSide], oppSp: g.pitchers[oppSide] }, line, false));
+    const posted = bs.every((b) => b.confirmed);
+    return `<div class="card list">${rows.join("")}</div><p class="note">${posted ? "Official lineup." : "Projected from the last game; not posted yet."}</p>`;
+  };
+  const sps = ["away", "home"].map((side) => g.pitchers[side]
+    ? pitcherRow({ ...g.pitchers[side], game: g, side, team: g[side], opp: g[side === "home" ? "away" : "home"] }, state.pitLine)
+    : `<div class="row-btn"><span class="who"><b>${esc(teamAbbr(g[side]))} starter TBD</b></span></div>`).join("");
+  const facts = [gameTime(g.time), g.venue, g.umpire ? `HP umpire ${g.umpire}` : "",
+    g.temp_f != null ? `${Math.round(g.temp_f)}°F` : "", g.wind || ""].filter(Boolean).map(esc).join(" · ");
+  return `
+    <div class="detail">
+      <h2 id="sheet-title">${esc(g.away.name)} @ ${esc(g.home.name)}</h2>
+      <p class="sub">${facts}</p>
+      <h3 class="section-title">Starting pitchers</h3>
+      <div class="card list">${sps}</div>
+      <h3 class="section-title">${esc(g.away.name)} · H+R+RBI over ${line}</h3>
+      ${lineup("away")}
+      <h3 class="section-title">${esc(g.home.name)} · H+R+RBI over ${line}</h3>
+      ${lineup("home")}
+    </div>`;
+}
+
+// ---------- player sheet ----------
+function statGrid(pairs) {
+  return `<div class="stat-grid">${pairs
+    .filter(([, v]) => v != null && v !== "–")
+    .map(([k, v]) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join("")}</div>`;
+}
+function overTable(pmf, kind) {
+  const rows = lines(kind).map((l) => {
+    const p = pOver(pmf, l);
+    return `<tr><td>${l}</td><td>${pct(p)}</td><td>${fairOdds(p)}</td><td>${pct(1 - p)}</td><td>${fairOdds(1 - p)}</td></tr>`;
+  }).join("");
+  return `<table><thead><tr><th>Line</th><th>Over</th><th>Fair</th><th>Under</th><th>Fair</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="note">Fair = the model's chance as American odds, with no bookmaker margin. A bet is worth a look only when your sportsbook pays more than this.</p>`;
+}
+function playerSheet(kind, p) {
+  const line = state.sheetLine ?? (kind === "pitcher" ? state.pitLine : state.batLine);
+  const where = `${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)}`;
+  const s = p.stats || {};
+  const r1 = (x) => (x == null ? null : x.toFixed(1));
+  const r2 = (x) => (x == null ? null : x.toFixed(2));
+  const factor = (x) => (x == null ? null : `${x >= 1 ? "+" : "−"}${Math.abs((x - 1) * 100).toFixed(0)}%`);
+  if (kind === "pitcher") {
+    return `
+      <div class="detail">
+        <h2 id="sheet-title">${esc(p.name)}</h2>
+        <p class="sub">${where} · ${handName(p.hand)}</p>
+        <div class="hero"><b>${fix(p.mu)}</b><span>projected strikeouts</span></div>
+        ${lineSwitch("pitcher", line, "data-sheet-line")}
+        ${distChart(collapse(p.pmf, 13), line, "K")}
+        ${overTable(p.pmf, "pitcher")}
+        <h3 class="section-title">Why</h3>
+        ${statGrid([
+          ["K per start, last 5", r1(s.k_per_start_l5)], ["K per start, season", r1(s.k_per_start_szn)],
+          ["K%, season", s.k_pct_szn == null ? null : pct(s.k_pct_szn, 1)], ["Whiff%, season", s.whiff_pct_szn == null ? null : pct(s.whiff_pct_szn, 1)],
+          ["Outs per start, last 5", r1(s.outs_per_start_l5)], ["Pitches, last 5", r1(s.pitches_per_start_l5)],
+          ["ERA, season", r2(s.era_szn)], ["Starts, season", s.starts_szn == null ? null : String(s.starts_szn)],
+          ["Opp. lineup K% vs hand", s.lineup_k_pct == null ? null : pct(s.lineup_k_pct, 1)], ["Opp. team K%, season", s.opp_team_k_pct == null ? null : pct(s.opp_team_k_pct, 1)],
+          ["Umpire K effect", factor(s.ump_k_factor)], ["Park K effect", factor(s.park_k_factor)],
+          ["Days rest", s.days_rest == null ? null : String(s.days_rest)],
+        ])}
+      </div>`;
+  }
+  const vs = p.oppSp ? `vs ${esc(p.oppSp.name)} (${handName(p.oppSp.hand)})` : "starter TBD";
+  return `
+    <div class="detail">
+      <h2 id="sheet-title">${esc(p.name)}</h2>
+      <p class="sub">${where} · ${p.order ? `bats ${ordinal(p.order)}` : ""} ${p.confirmed ? "" : "(projected)"} · ${vs}</p>
+      <div class="hero"><b>${fix(p.mu, 2)}</b><span>projected H+R+RBI</span></div>
+      ${lineSwitch("batter", line, "data-sheet-line")}
+      ${distChart(collapse(p.pmf, 7), line, "H+R+RBI")}
+      ${overTable(p.pmf, "batter")}
+      <h3 class="section-title">Why</h3>
+      ${statGrid([
+        ["H+R+RBI per game, last 15", r2(s.hrr_per_g_l15)], ["H+R+RBI per game, season", r2(s.hrr_per_g_szn)],
+        [`Per PA vs ${p.vs === "L" ? "lefties" : "righties"}`, r2(s.hrr_per_pa_vs_hand)], ["PA per game, last 15", r1(s.pa_per_g_l15)],
+        ["xwOBA, season", s.xwoba_szn == null ? null : s.xwoba_szn.toFixed(3)], ["Games, season", s.games_szn == null ? null : String(s.games_szn)],
+        ["Opp. starter K%", s.opp_sp_k_pct == null ? null : pct(s.opp_sp_k_pct, 1)], ["Opp. starter ERA", r2(s.opp_sp_era)],
+        ["Park run effect", factor(s.park_r_factor)], ["Bats", batsName(p.bats)],
+      ])}
+    </div>`;
+}
+
+// ---------- hitters / pitchers ----------
+function matchesQuery(p) {
+  const q = state.query.trim().toLowerCase();
+  if (!q) return true;
+  return [p.name, p.team?.name, p.team?.abbr].some((x) => (x || "").toLowerCase().includes(q));
+}
+function viewHitters() {
+  if (!slate()) return noGames();
+  const line = state.batLine;
+  const list = allBatters().filter(matchesQuery).sort((a, b) => pOver(b.pmf, line) - pOver(a.pmf, line));
+  return `${daySwitch()}
+    ${lineSwitch("batter", line, "data-bat-line")}
+    <input class="search" id="search" type="search" placeholder="Search player or team" value="${esc(state.query)}" autocomplete="off">
+    <h2 class="section-title">Chance of H+R+RBI over ${line}</h2>
+    ${list.length ? `<div class="card list">${list.slice(0, 150).map((b) => batterRow(b, line)).join("")}</div>` : '<div class="empty">No hitters yet for this day.</div>'}
+    <p class="note">"proj" = lineup not posted yet; based on the team's last game.</p>`;
+}
+function viewPitchers() {
+  if (!slate()) return noGames();
+  const line = state.pitLine;
+  const list = allPitchers().filter(matchesQuery).sort((a, b) => b.mu - a.mu);
+  return `${daySwitch()}
+    ${lineSwitch("pitcher", line, "data-pit-line")}
+    <input class="search" id="search" type="search" placeholder="Search pitcher or team" value="${esc(state.query)}" autocomplete="off">
+    <h2 class="section-title">Projected strikeouts</h2>
+    ${list.length ? `<div class="card list">${list.map((p) => pitcherRow(p, line)).join("")}</div>` : '<div class="empty">No probable starters announced yet.</div>'}`;
+}
+
+// ---------- record ----------
+function viewRecord() {
+  const rec = state.data?.record?.[state.recKind];
+  const toggle = `<div class="segmented">${[["batter", "Hitters · H+R+RBI"], ["pitcher", "Pitchers · K"]]
+    .map(([k, l]) => `<button data-rec="${k}" class="${k === state.recKind ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  if (!rec || !rec.n) return `${toggle}<div class="empty">Not enough finished games yet to grade the model.</div>`;
+  const unit = state.recKind === "batter" ? "H+R+RBI" : "K";
+  const better = rec.mae_baseline - rec.mae_model;
+  const tp = rec.top_picks || {};
+  return `${toggle}
+    <h2 class="section-title">Last ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days, not used in training</h2>
+    <div class="tiles">
+      <div class="tile"><div class="label">Average miss</div><div class="value">${fix(rec.mae_model, 2)}</div><div class="sub">${unit} per game</div></div>
+      <div class="tile"><div class="label">Season average's miss</div><div class="value">${fix(rec.mae_baseline, 2)}</div><div class="sub">${better >= 0 ? `model ${(better / rec.mae_baseline * 100).toFixed(0)}% closer` : "model not better yet"}</div></div>
+      <div class="tile"><div class="label">Daily top-10 over ${tp.line}</div><div class="value">${pct(tp.actual)}</div><div class="sub">hit · model said ${pct(tp.predicted)}</div></div>
+      <div class="tile"><div class="label">${state.recKind === "batter" ? "Hitter" : "Starter"} games graded</div><div class="value">${rec.n.toLocaleString()}</div><div class="sub">${shortDate(rec.test_from)} – ${shortDate(rec.test_to)}</div></div>
+    </div>
+    <h2 class="section-title">Are the chances honest?</h2>
+    <div class="card">${calibrationChart(rec.calibration || [])}</div>
+    <p class="note">"Season average" is the player's own ${unit} per game this season, the obvious guess without a model. The model retrains every run on all finished games; this check holds out the most recent ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days.</p>`;
+}
+
+// ---------- shell ----------
+const VIEWS = { games: viewGames, hitters: viewHitters, pitchers: viewPitchers, record: viewRecord };
+
+function render() {
+  $("#view").innerHTML = VIEWS[state.tab]();
+  document.querySelectorAll(".tabbar button").forEach((b) => {
+    const on = b.dataset.tab === state.tab;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-current", on ? "page" : "false");
+  });
+  bindCharts($("#view"));
+}
+function setTab(tab) {
+  state.tab = tab;
+  state.query = "";
+  render();
+  window.scrollTo(0, 0);
+  $("#view").focus({ preventScroll: true });
+}
+function setUpdated() {
+  const d = state.data;
+  const mins = Math.round((Date.now() - Date.parse(d.generated_at)) / 60000);
+  const ago = mins < 1 ? "just now" : mins < 60 ? `${mins} min ago` : mins < 1440 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} days ago`;
+  $("#updated").textContent = `Updated ${ago}`;
+}
+
+function openSheet(html) {
+  $("#sheet-body").innerHTML = html;
+  const sheet = $("#sheet");
+  sheet.hidden = false;
+  document.body.style.overflow = "hidden";
+  bindCharts($("#sheet-body"));
+  $(".sheet-close", sheet).focus();
+}
+function closeSheet() {
+  $("#sheet").hidden = true;
+  document.body.style.overflow = "";
+  state.sheetPlayer = null;
+  state.sheetLine = null;
+}
+function showPlayer(kind, gamePk, id) {
+  const p = findPlayer(kind, gamePk, id);
+  if (!p) return;
+  state.sheetPlayer = { kind, gamePk, id };
+  openSheet(playerSheet(kind, p));
+}
+
+document.addEventListener("click", (ev) => {
+  const t = ev.target.closest("button, [data-close]");
+  if (!t) return;
+  if (t.dataset.tab) setTab(t.dataset.tab);
+  else if (t.dataset.day) { state.day = Number(t.dataset.day); render(); }
+  else if (t.dataset.batLine) { state.batLine = Number(t.dataset.batLine); store.set("batLine", state.batLine); render(); }
+  else if (t.dataset.pitLine) { state.pitLine = Number(t.dataset.pitLine); store.set("pitLine", state.pitLine); render(); }
+  else if (t.dataset.rec) { state.recKind = t.dataset.rec; store.set("recKind", state.recKind); render(); }
+  else if (t.dataset.sheetLine) {
+    state.sheetLine = Number(t.dataset.sheetLine);
+    const sp = state.sheetPlayer;
+    if (sp) { const p = findPlayer(sp.kind, sp.gamePk, sp.id); $("#sheet-body").innerHTML = playerSheet(sp.kind, p); bindCharts($("#sheet-body")); }
+  } else if (t.dataset.player) showPlayer(t.dataset.player, Number(t.dataset.game), Number(t.dataset.id));
+  else if (t.dataset.game) {
+    const g = slate().games.find((x) => x.game_pk === Number(t.dataset.game));
+    if (g) openSheet(gameSheet(g));
+  } else if (t.hasAttribute("data-close")) closeSheet();
+  else if (t.id === "refresh") load(true);
+});
+document.addEventListener("input", (ev) => {
+  if (ev.target.id !== "search") return;
+  state.query = ev.target.value;
+  const pos = ev.target.selectionStart;
+  render();
+  const s = $("#search");
+  s.focus();
+  s.setSelectionRange(pos, pos);
+});
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeSheet(); });
+
+// ---------- load ----------
+async function load(force = false) {
+  const btn = $("#refresh");
+  btn.classList.add("spin");
+  try {
+    const res = await fetch("data.json", { cache: force ? "reload" : "no-cache" });
+    if (!res.ok) throw new Error(res.statusText);
+    state.data = await res.json();
+    state.day = Math.min(state.day, Math.max(slates().length - 1, 0));
+    setUpdated();
+    render();
+  } catch (err) {
+    if (!state.data) $("#view").innerHTML = `<div class="empty">Couldn't load predictions.<br><span class="muted">${esc(err.message || err)}</span></div>`;
+  } finally {
+    btn.classList.remove("spin");
+  }
+}
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}
+load();

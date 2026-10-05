@@ -6,7 +6,7 @@ import argparse
 import logging
 from datetime import date, timedelta
 
-from . import collect, config, features, slate, storage
+from . import collect, config, features, mlb_api, publish, slate, storage
 
 
 def _date(s: str) -> date:
@@ -21,10 +21,18 @@ def main(argv: list[str] | None = None) -> None:
     c = sub.add_parser("collect", help="download boxscores (+ optional Statcast) for a date range")
     c.add_argument("--start", type=_date, required=True)
     c.add_argument("--end", type=_date, default=date.today() - timedelta(days=1))
-    c.add_argument("--game-type", default="R", help="R, P, or R,P")
+    c.add_argument("--game-type", default=mlb_api.ALL_GAME_TYPES,
+                   help="comma-separated: R regular season, F,D,L,W postseason rounds")
     c.add_argument("--statcast", action="store_true", help="also fetch Statcast pitch data (slow)")
 
     sub.add_parser("features", help="build model training tables from processed data")
+
+    p = sub.add_parser("publish", help="update data, train models, write the phone app to --out")
+    p.add_argument("--out", default="_site")
+    p.add_argument("--history-start", type=_date, default=None,
+                   help="first date to collect on a fresh run (default: March 1, two seasons back)")
+    p.add_argument("--statcast", action="store_true",
+                   help="also keep Statcast pitch data up to date (first run downloads all of it)")
 
     s = sub.add_parser("slate", help="feature rows for upcoming games on a date")
     s.add_argument("--date", type=_date, default=date.today())
@@ -43,6 +51,8 @@ def main(argv: list[str] | None = None) -> None:
             path = config.FEATURES_DIR / f"{name}.parquet"
             storage.write(df, path)
             logging.info("wrote %s: %d rows x %d cols", path, *df.shape)
+    elif args.cmd == "publish":
+        publish.publish(args.out, history_start=args.history_start, statcast=args.statcast)
     elif args.cmd == "slate":
         out = slate.build_slate(args.date)
         for name, df in out.items():

@@ -34,7 +34,7 @@ def fetch_day(day: date, *, game_type: str = "R") -> pd.DataFrame:
         "all": "true",
         "type": "details",
         "player_type": "pitcher",
-        "hfGT": f"{game_type}|",
+        "hfGT": "".join(f"{t}|" for t in game_type.split(",")),
         "game_date_gt": day.isoformat(),
         "game_date_lt": day.isoformat(),
     }
