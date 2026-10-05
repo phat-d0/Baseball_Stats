@@ -380,3 +380,5 @@ td.edge-pos { color: var(--good-text); font-weight: 600; }
   color: var(--good-text);
 }
 .badge svg { width: 13px; height: 13px; }
+
+.dim, .row-btn.stale { opacity: 0.5; }

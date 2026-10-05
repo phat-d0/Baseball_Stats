@@ -159,6 +159,16 @@ def evaluate(df: pd.DataFrame, kind: str, *, test_days: int = 30,
     t = test.assign(_p=p_over(dist, main), _hit=(y > main).astype(float))
     top = t.sort_values("_p", ascending=False).groupby("game_date").head(10)
 
+    by_line = {}
+    for ln in lines:
+        pl, hl = p_over(dist, ln), (y > ln).astype(float)
+        bl = np.clip((pl * 10).astype(int), 0, 9)
+        by_line[f"{ln:g}"] = [
+            {"p": float(pl[bl == b].mean()), "actual": float(hl[bl == b].mean()),
+             "n": int((bl == b).sum())}
+            for b in range(10) if (bl == b).sum() >= 20
+        ]
+
     summary = {
         "test_from": test["game_date"].min().date().isoformat(),
         "test_to": test["game_date"].max().date().isoformat(),
@@ -172,6 +182,7 @@ def evaluate(df: pd.DataFrame, kind: str, *, test_days: int = 30,
         "logloss_model": logloss(dist),
         "logloss_baseline": logloss(base_dist),
         "calibration": calib,
+        "calibration_by_line": by_line,
         "top_picks": {"line": main, "n": int(len(top)),
                       "predicted": float(top["_p"].mean()), "actual": float(top["_hit"].mean())},
     }

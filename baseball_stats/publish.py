@@ -210,6 +210,7 @@ def publish(out: str | Path, *, history_start: date | None = None,
     if statcast:
         update_statcast(today, history_start)
     grades = tracking.update_grades()
+    market = tracking.summary(grades)
     if not grades.empty:
         log.info("price log grades: %s", grades["status"].value_counts().to_dict())
 
@@ -272,7 +273,7 @@ def publish(out: str | Path, *, history_start: date | None = None,
         "slates": [slate_json(d, s, models, names, label(d), props if d == today else None)
                    for d, s in slates],
         "odds_source": asdict(odds_status),
-        "record": record,
+        "record": {**record, "market": market},
     }
     data = _clean(data)
 

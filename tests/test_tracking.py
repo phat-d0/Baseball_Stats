@@ -189,3 +189,51 @@ def test_closing_pull_paid_before_unpriced_games(tmp_path, monkeypatch):
     ledger = odds.Ledger.load(); ledger.spent = 0; ledger.save()
     odds.fetch_props(games.iloc[[0]], now=later + timedelta(minutes=20), api_key="k", session=api)
     assert api.paid_calls == 2
+
+
+# ---- summary ----------------------------------------------------------------
+
+def test_five_hand_built_picks():
+    # +100 W, -110 L, +150 W, -200 W, +120 L  -> profits 1, -1, 1.5, 0.5, -1
+    p = pd.DataFrame({
+        "price": [100, -110, 150, -200, 120], "won": [True, False, True, True, False],
+        "p": [0.55, 0.6, 0.45, 0.7, 0.5], "status": ["graded"] * 5,
+        "clv": [0.02, -0.01, None, 0.03, 0.0], "close_line": [None] * 5,
+        "line": [5.5] * 5, "side": ["over"] * 5,
+    })
+    m = tracking.pick_metrics(p)
+    assert m["n"] == 5 and m["n_void"] == 0
+    assert m["win"] == pytest.approx(0.6, abs=1e-4)
+    assert m["breakeven"] == pytest.approx((0.5 + 110 / 210 + 0.4 + 2 / 3 + 100 / 220) / 5, abs=1e-4)
+    assert m["roi"] == pytest.approx(0.2, abs=1e-4)
+    assert m["expected"] == pytest.approx(0.56, abs=1e-4)
+    assert m["roi_lo"] < m["roi"] < m["roi_hi"]
+    assert m["clv"] == pytest.approx(1.0, abs=1e-4)  # mean of +2, -1, +3, 0 points
+    assert m["moves"] == {"toward": 0.5, "away": 0.25, "stayed": 0.25}
+
+
+def test_picks_one_per_player_and_threshold():
+    rows = [_snap(300, 5.5, 120, -140), _snap(30, 5.5, 105, -125)]
+    g = _grade(rows, k=7)
+    g["p_model"] = 0.55  # over at +120 -> EV 0.21; at +105 -> 0.1275
+    g["ev_over"] = g["p_model"] * g["over"].map(odds.american_to_decimal) - 1
+    g["ev_under"] = -0.5
+    p5 = tracking.picks(g, 0.05)
+    assert len(p5) == 1 and p5.iloc[0]["price"] == 120 and p5.iloc[0]["won"]
+    assert p5.iloc[0]["clv"] == pytest.approx(g.iloc[0]["clv_over"])
+    assert tracking.picks(g, 0.25).empty
+
+
+def test_market_summary_end_to_end(fake, dk, tmp_path):
+    _publish(tmp_path, RUN1)
+    _finish_game(k=7, hrr=1)
+    data = _publish(tmp_path, datetime(2025, 6, 16, 16, 0, tzinfo=UTC))
+    market = data["record"]["market"]
+    assert market["first_snapshot"] == "2025-06-15"
+    assert market["pitcher"]["n_lines"] == 1
+    assert set(market["pitcher"]["by_threshold"]) == {"0.02", "0.05", "0.08", "0.12"}
+
+
+def test_no_key_market_empty(fake, tmp_path, monkeypatch):
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    assert _publish(tmp_path, RUN1)["record"]["market"] == {}

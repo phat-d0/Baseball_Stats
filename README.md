@@ -35,21 +35,24 @@ chance is worth, filtered by a minimum edge you choose. Each player's sheet show
 DraftKings line next to the model. Add a free API key as the repo secret `ODDS_API_KEY`
 (Settings → Secrets and variables → Actions). Without a key the app just shows fair odds.
 
-Props are priced per game (about 2 credits a game), so refreshes run on a strict budget:
+Props are priced per game (about 2 credits a game), under a daily budget:
 - Listing the day's games is free and reports the real credit balance.
-- Each day may spend `(credits left − 20 reserve) ÷ days until the monthly reset`. That's
-  about 15 credits, or ~7 games, on the free 500-credit plan. A paid plan automatically
-  buys more games and more refreshes.
-- Games are priced soonest first pitch first, only within 8 hours of first pitch, and
-  each game at most once every 2 hours. A game DraftKings hasn't posted props for yet
-  costs nothing.
-- The reset day is set to the 5th in the workflow and learned automatically when the
-  balance goes back up.
-- The key is shared with the soccer app, so this app spends at most **200 credits a month**
-  (about 6 a day, ~3 games priced once). The soccer app budgets from the real balance and
-  adapts to what's left. Change the cap with the repository variable `ODDS_API_MONTHLY_CAP`
-  (Settings → Secrets and variables → Actions → Variables); `0` removes it, e.g. after
-  upgrading the plan or giving this app its own key.
+- Each day may spend `(credits left − 20 reserve) ÷ days until the monthly reset`.
+- A game is priced within 8 hours of first pitch: every 2 hours, then every 30 minutes in
+  the last 3 hours (when lineups post and lines move), plus one closing pull inside 45
+  minutes. When credits are short: closing pulls first, then unpriced games, then refreshes.
+- On the 20k plan that's about 7,000 credits a month in season. The optional repository
+  variable `ODDS_API_MONTHLY_CAP` limits this app's monthly spend (unset = no cap).
+
+**Pick log and grading** (`baseball_stats/tracking.py`): every DraftKings price the app
+downloads is stored once in `prop_snapshots`, with the model's numbers at that moment, and
+force-pushed to the `odds-log` branch so it survives a lost cache. After each game,
+`prop_grades` grades every snapshot: won or lost (void when the game wasn't played, the
+player didn't start, or a whole-number line pushed), and how DraftKings' price moved by
+first pitch (closing line value). The Record tab's **vs DraftKings** card shows, per edge
+threshold: picks graded, return per $1 with a 90% range, win rate vs break-even, closing
+line value, the model's log loss vs DraftKings' on the same closing lines, and results by
+edge size. Below 200 graded picks it's greyed out: that few is mostly luck.
 
 Refreshing the app on your phone never uses credits.
 

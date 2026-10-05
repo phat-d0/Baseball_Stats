@@ -228,3 +228,145 @@ def update_grades(base=None) -> pd.DataFrame:
         path = storage.table_path("prop_grades", base)
         storage.write(grades, path)  # derived: replaced in full, never merged
     return grades
+
+
+# --------------------------------------------------------------------------- #
+# Picks and the Record tab's "vs DraftKings" numbers
+# --------------------------------------------------------------------------- #
+
+EDGE_STEPS = [0.02, 0.05, 0.08, 0.12]  # same as the app's minimum-edge control
+EDGE_BUCKETS = [(0.02, 0.05), (0.05, 0.08), (0.08, 0.12), (0.12, None)]
+BOOTSTRAP = 2000
+
+
+def picks(grades: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """The app's value pick per player, game and kind, as first seen above ``threshold``.
+
+    Mirrors ``bestBet`` in web/app.js: at each download, the line and side with the
+    highest expected return; the pick is the first download where that clears the
+    threshold. Staked at a flat $1.
+    """
+    if grades.empty:
+        return pd.DataFrame()
+    rows = []
+    g = grades.sort_values("fetched_at")
+    for _, grp in g.groupby(["game_pk", "player_id", "kind"], sort=False):
+        for _, snap in grp.groupby("fetched_at", sort=True):
+            best = None
+            for r in snap.itertuples(index=False):
+                for side in ("over", "under"):
+                    ev, price = getattr(r, f"ev_{side}"), getattr(r, side)
+                    if pd.isna(ev) or pd.isna(price):
+                        continue
+                    if best is None or ev > best[0]:
+                        best = (ev, side, price, r)
+            if best is None or best[0] < threshold:
+                continue
+            ev, side, price, r = best
+            won = None
+            if r.status == "graded" and not pd.isna(r.over_won):
+                won = bool(r.over_won) if side == "over" else not bool(r.over_won)
+            clv = None if pd.isna(r.clv_over) else (r.clv_over if side == "over" else -r.clv_over)
+            rows.append({
+                "game_pk": r.game_pk, "player_id": r.player_id, "kind": r.kind,
+                "game_date": pd.Timestamp(r.game_date), "fetched_at": r.fetched_at,
+                "line": r.line, "side": side, "price": int(price), "ev": float(ev),
+                "p": float(r.p_model if side == "over" else 1 - r.p_model),
+                "status": r.status, "won": won, "clv": clv,
+                "close_line": None if pd.isna(r.close_line) else float(r.close_line),
+                "lineup_confirmed": bool(r.lineup_confirmed) if not pd.isna(r.lineup_confirmed) else True,
+            })
+            break  # one pick per player, game and kind
+    return pd.DataFrame(rows)
+
+
+def _move(p: pd.Series) -> str | None:
+    """Did the closing market move toward the pick, away from it, or stay?"""
+    if p["close_line"] is not None and not pd.isna(p["close_line"]) and p["close_line"] != p["line"]:
+        up = p["close_line"] > p["line"]  # a higher line means the market expects more
+        return "toward" if up == (p["side"] == "over") else "away"
+    if p["clv"] is None or pd.isna(p["clv"]):
+        return None
+    return "toward" if p["clv"] > 1e-9 else "away" if p["clv"] < -1e-9 else "stayed"
+
+
+def pick_metrics(p: pd.DataFrame, seed: int = 0) -> dict:
+    """Win rate, expected and break-even rates, return per $1 (90% bootstrap), CLV."""
+    if p.empty:
+        return {"n": 0, "n_void": 0}
+    graded = p[p["status"] == "graded"]
+    out = {"n": int(len(graded)), "n_void": int((p["status"] == "void").sum()),
+           "n_pending": int((p["status"] == "pending").sum())}
+    if graded.empty:
+        return out
+    dec = graded["price"].map(odds.american_to_decimal).astype(float)
+    won = graded["won"].astype(bool).to_numpy()
+    profit = np.where(won, dec - 1, -1.0)
+    boot = np.random.default_rng(seed).choice(profit, size=(BOOTSTRAP, len(profit))).mean(axis=1)
+    out.update({
+        "win": float(won.mean()),
+        "expected": float(graded["p"].mean()),
+        "breakeven": float((1 / dec).mean()),
+        "roi": float(profit.sum() / len(profit)),
+        "roi_lo": float(np.percentile(boot, 5)),
+        "roi_hi": float(np.percentile(boot, 95)),
+    })
+    clv = graded["clv"].dropna().astype(float)
+    if len(clv):
+        out.update({"clv": float(clv.mean() * 100), "clv_pos": float((clv > 0).mean()), "n_clv": int(len(clv))})
+    moves = graded.apply(_move, axis=1).dropna()
+    if len(moves):
+        out["moves"] = {k: float((moves == k).mean()) for k in ("toward", "away", "stayed")}
+    return out
+
+
+def _logloss(p: pd.Series, y: pd.Series) -> float:
+    p = np.clip(p.astype(float).to_numpy(), 1e-6, 1 - 1e-6)
+    y = y.astype(bool).to_numpy()
+    return float(-np.mean(np.where(y, np.log(p), np.log(1 - p))))
+
+
+def summary(grades: pd.DataFrame, *, days: int | None = None) -> dict:
+    """``record.market`` in data.json: picks vs DraftKings per kind and edge threshold.
+
+    ``days`` limits everything to the most recent days of games; each threshold also
+    carries a ``last30`` cut.
+    """
+    if grades is None or grades.empty:
+        return {}
+    g = grades.copy()
+    g["game_date"] = pd.to_datetime(g["game_date"])
+    if days is not None:
+        g = g[g["game_date"] > g["game_date"].max() - pd.Timedelta(days=days)]
+    out: dict = {"first_snapshot": g["game_date"].min().date().isoformat()}
+    recent_from = g["game_date"].max() - pd.Timedelta(days=30)
+    for kind in ("pitcher", "batter"):
+        k = g[g["kind"] == kind]
+        if k.empty:
+            out[kind] = {}
+            continue
+        res: dict = {}
+        # Model vs DraftKings on the same rows: the closing snapshot, one row per line.
+        close = k[k["is_close"].astype(bool) & (k["status"] == "graded") & k["p_book"].notna()]
+        if len(close):
+            res.update({"logloss_model": _logloss(close["p_model"], close["over_won"]),
+                        "logloss_book": _logloss(close["p_book"], close["over_won"]),
+                        "n_lines": int(len(close))})
+        res["by_threshold"] = {}
+        for t in EDGE_STEPS:
+            p = picks(k, t)
+            m = pick_metrics(p)
+            m["last30"] = pick_metrics(p[p["game_date"] > recent_from]) if not p.empty else {"n": 0}
+            res["by_threshold"][f"{t:g}"] = m
+        base = picks(k, EDGE_STEPS[0])
+        res["by_edge"] = []
+        for lo, hi in EDGE_BUCKETS:
+            sel = base[(base["ev"] >= lo) & ((base["ev"] < hi) if hi else True)] if not base.empty else base
+            res["by_edge"].append({"lo": lo, "hi": hi, **pick_metrics(sel)})
+        if kind == "batter" and not base.empty:
+            res["by_lineup"] = {
+                "confirmed": pick_metrics(base[base["lineup_confirmed"]]),
+                "projected": pick_metrics(base[~base["lineup_confirmed"]]),
+            }
+        out[kind] = res
+    return out

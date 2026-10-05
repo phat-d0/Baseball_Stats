@@ -13,6 +13,7 @@ const state = {
   pitLine: store.get("pitLine", 5.5),
   recKind: store.get("recKind", "batter"),
   minEdge: store.get("minEdge", 0.05),
+  calLine: null, // calibration chart: null = all lines pooled
   query: "",
   sheetLine: null, // line picked inside an open player sheet
   sheetPlayer: null,
@@ -59,7 +60,7 @@ function bestBet(player) {
       const ev = b[`ev_${side}`];
       if (ev == null || b[side] == null) continue;
       if (!best || ev > best.ev) {
-        best = { line: b.line, side, price: b[side], ev, p: side === "over" ? b.p_model : 1 - b.p_model };
+        best = { line: b.line, side, price: b[side], ev, p: side === "over" ? b.p_model : 1 - b.p_model, fetchedAt: b.fetched_at };
       }
     }
   }
@@ -102,18 +103,24 @@ function valuePicks() {
   if (slate()?.label !== "Today") return "";
   const all = [...allPitchers().map((p) => ({ ...p, kind: "pitcher" })), ...allBatters().map((b) => ({ ...b, kind: "batter" }))];
   if (!all.some((p) => p.book?.length)) return oddsNote();
-  const picks = all.map((p) => ({ p, bb: bestBet(p) })).filter((x) => x.bb && x.bb.ev >= state.minEdge)
+  // Batters from a projected lineup stay out: they may not play (they're still in Hitters).
+  const picks = all.filter((p) => p.kind === "pitcher" || p.confirmed !== false)
+    .map((p) => ({ p, bb: bestBet(p) })).filter((x) => x.bb && x.bb.ev >= state.minEdge)
     .sort((a, b) => b.bb.ev - a.bb.ev).slice(0, 12);
-  const rows = picks.map(({ p, bb }) => `
-    <button class="row-btn" data-player="${p.kind}" data-game="${p.game.game_pk}" data-id="${p.id}">
+  const rows = picks.map(({ p, bb }) => {
+    const mins = bb.fetchedAt ? Math.round((Date.now() - Date.parse(bb.fetchedAt)) / 60000) : null;
+    const age = mins == null ? "" : `<span class="meta">Price ${mins < 60 ? `${mins} min` : `${(mins / 60).toFixed(1)} h`} old</span>`;
+    return `
+    <button class="row-btn ${mins != null && mins > 90 ? "stale" : ""}" data-player="${p.kind}" data-game="${p.game.game_pk}" data-id="${p.id}">
       <span class="who"><b>${esc(p.name)}</b>
-        <span class="meta">${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${p.kind === "pitcher" ? "K" : "H+R+RBI"} · ${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))}</span></span>
+        <span class="meta">${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${p.kind === "pitcher" ? "K" : "H+R+RBI"} · ${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))}</span>${age}</span>
       <span class="vals"><b class="pos-text">${signedPct(bb.ev)}</b><small>${american(bb.price)} · model ${pct(bb.p)}</small></span>
-    </button>`).join("");
+    </button>`;
+  }).join("");
   return `<h2 class="section-title">Value picks · DraftKings</h2>
     ${edgeControl()}
     ${picks.length ? `<div class="card list">${rows}</div>` : `<div class="card"><span class="muted">Nothing above a ${pct(state.minEdge)} edge right now.</span></div>`}
-    <p class="note">Edge = how much the model expects a $1 bet to return above your stake at DraftKings' price. Small edges are mostly noise; check Record before trusting them.</p>
+    <p class="note">Edge = how much the model expects a $1 bet to return above your stake at DraftKings' price. Small edges are mostly noise; check Record → vs DraftKings before trusting them. Greyed = price over 90 minutes old. Hitters from projected lineups are left out until their lineup posts.</p>
     ${oddsNote()}`;
 }
 function bookTable(player) {
@@ -441,16 +448,59 @@ function viewPitchers() {
 }
 
 // ---------- record ----------
+const MIN_PICKS = 200; // below this, results are mostly luck
+
+function marketCard() {
+  const m = state.data?.record?.market;
+  const k = m?.[state.recKind];
+  const head = `<h2 class="section-title">vs DraftKings</h2>`;
+  if (!k || !k.by_threshold) {
+    return `${head}<div class="card"><span class="muted">No graded DraftKings picks yet. Every price the app downloads is logged and graded after the game${m?.first_snapshot ? `; logging since ${shortDate(m.first_snapshot)}` : ""}.</span></div>`;
+  }
+  const t = k.by_threshold[String(state.minEdge)] || { n: 0 };
+  const few = (t.n || 0) < MIN_PICKS;
+  const pts = (x) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(1)} pts`);
+  const tiles = `
+    <div class="tiles ${few ? "dim" : ""}">
+      <div class="tile"><div class="label">Picks graded</div><div class="value">${(t.n || 0).toLocaleString()}</div><div class="sub">${t.n_void || 0} void · ${t.n_pending || 0} pending</div></div>
+      <div class="tile"><div class="label">Return per $1</div><div class="value ${t.roi > 0 && !few ? "pos-text" : ""}">${signedPct(t.roi, 1)}</div><div class="sub">90% range ${signedPct(t.roi_lo, 0)} to ${signedPct(t.roi_hi, 0)}</div></div>
+      <div class="tile"><div class="label">Win rate</div><div class="value">${pct(t.win, 1)}</div><div class="sub">break-even ${pct(t.breakeven, 1)} · model said ${pct(t.expected, 1)}</div></div>
+      <div class="tile"><div class="label">Closing line value</div><div class="value">${pts(t.clv)}</div><div class="sub">${t.clv_pos == null ? "no closing prices yet" : `${pct(t.clv_pos)} beat the close`}</div></div>
+    </div>`;
+  const ll = k.logloss_model != null
+    ? `<p class="note">Model log loss <b class="${k.logloss_model < k.logloss_book ? "pos-text" : ""}">${k.logloss_model.toFixed(4)}</b> vs DraftKings ${k.logloss_book.toFixed(4)} on ${k.n_lines.toLocaleString()} closing lines. Lower is better; if the model isn't lower, it knows nothing the price doesn't.</p>`
+    : "";
+  const edgeRows = (k.by_edge || []).map((b) => `<tr><td>${pct(b.lo)}${b.hi ? `–${pct(b.hi)}` : "+"}</td><td>${b.n || 0}</td><td>${pct(b.win)}</td><td>${signedPct(b.roi, 1)}</td><td>${b.clv == null ? "–" : pts(b.clv)}</td></tr>`).join("");
+  const lineup = k.by_lineup
+    ? `<p class="note">Hitters at a 2%+ edge: confirmed lineups ${signedPct(k.by_lineup.confirmed?.roi, 1)} on ${k.by_lineup.confirmed?.n || 0}, projected ${signedPct(k.by_lineup.projected?.roi, 1)} on ${k.by_lineup.projected?.n || 0}.</p>`
+    : "";
+  return `${head}
+    ${edgeControl()}
+    ${tiles}
+    ${few ? `<p class="note">Too few picks to judge yet (${t.n || 0} of ${MIN_PICKS}). Until then these numbers are mostly luck.</p>` : ""}
+    ${ll}
+    <div class="card"><table><thead><tr><th>Edge</th><th>Picks</th><th>Win</th><th>Return</th><th>CLV</th></tr></thead><tbody>${edgeRows}</tbody></table></div>
+    ${lineup}
+    <p class="note">A pick is the first DraftKings price at or above the edge, $1 flat, graded after the game. Closing line value: how far DraftKings' own chance moved toward the pick by first pitch, in percentage points; beating the close consistently is the surest sign of real value.</p>`;
+}
+
 function viewRecord() {
   const rec = state.data?.record?.[state.recKind];
   const toggle = `<div class="segmented">${[["batter", "Hitters · H+R+RBI"], ["pitcher", "Pitchers · K"]]
     .map(([k, l]) => `<button data-rec="${k}" class="${k === state.recKind ? "on" : ""}">${l}</button>`).join("")}</div>`;
-  if (!rec || !rec.n) return `${toggle}<div class="empty">Not enough finished games yet to grade the model.</div>`;
+  if (!rec || !rec.n) return `${toggle}${marketCard()}<div class="empty">Not enough finished games yet to grade the model.</div>`;
   const unit = state.recKind === "batter" ? "H+R+RBI" : "K";
   // Log loss of the over/under chances: how much better than the player's season average.
   const llGain = rec.logloss_baseline ? (rec.logloss_baseline - rec.logloss_model) / rec.logloss_baseline : null;
   const tp = rec.top_picks || {};
+  const byLine = rec.calibration_by_line || {};
+  const calKey = state.calLine != null && byLine[String(state.calLine)] ? String(state.calLine) : null;
+  const calSwitch = Object.keys(byLine).length
+    ? `<div class="segmented">${[[null, "All lines"], ...Object.keys(byLine).map((l) => [l, `O ${l}`])]
+        .map(([v, l]) => `<button data-cal-line="${v ?? ""}" class="${(v ?? null) === calKey ? "on" : ""}">${l}</button>`).join("")}</div>`
+    : "";
   return `${toggle}
+    ${marketCard()}
     <h2 class="section-title">Last ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days, not used in training</h2>
     <div class="tiles">
       <div class="tile"><div class="label">Over/under chances</div><div class="value">${llGain == null ? "–" : `${llGain >= 0 ? "+" : "−"}${Math.abs(llGain * 100).toFixed(1)}%`}</div><div class="sub">${llGain == null ? "" : llGain >= 0 ? "better than season average" : "worse than season average"}</div></div>
@@ -459,7 +509,8 @@ function viewRecord() {
       <div class="tile"><div class="label">${state.recKind === "batter" ? "Hitter" : "Starter"} games graded</div><div class="value">${rec.n.toLocaleString()}</div><div class="sub">${shortDate(rec.test_from)} – ${shortDate(rec.test_to)}</div></div>
     </div>
     <h2 class="section-title">Are the chances honest?</h2>
-    <div class="card">${calibrationChart(rec.calibration || [])}</div>
+    ${calSwitch}
+    <div class="card">${calibrationChart(calKey ? byLine[calKey] : rec.calibration || [])}</div>
     <p class="note">"Season average" is the player's own ${unit} per game this season, the obvious guess without a model. "Over/under chances" scores the chance of going over every line (log loss); it's what matters for betting, and it can improve even when the average miss barely moves. The model retrains every run on all finished games; this check holds out the most recent ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days.</p>`;
 }
 
@@ -518,7 +569,8 @@ document.addEventListener("click", (ev) => {
   else if (t.dataset.batLine) { state.batLine = Number(t.dataset.batLine); store.set("batLine", state.batLine); render(); }
   else if (t.dataset.pitLine) { state.pitLine = Number(t.dataset.pitLine); store.set("pitLine", state.pitLine); render(); }
   else if (t.dataset.edge) { state.minEdge = Number(t.dataset.edge); store.set("minEdge", state.minEdge); render(); }
-  else if (t.dataset.rec) { state.recKind = t.dataset.rec; store.set("recKind", state.recKind); render(); }
+  else if (t.dataset.calLine !== undefined) { state.calLine = t.dataset.calLine === "" ? null : t.dataset.calLine; render(); }
+  else if (t.dataset.rec) { state.recKind = t.dataset.rec; state.calLine = null; store.set("recKind", state.recKind); render(); }
   else if (t.dataset.sheetLine) {
     state.sheetLine = Number(t.dataset.sheetLine);
     const sp = state.sheetPlayer;
