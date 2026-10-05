@@ -38,11 +38,12 @@ jobs:
           cache: pip
 
       # Finished games never change: keep the processed tables between runs so each run
-      # only downloads games played since the last one.
-      - uses: actions/cache@v4
+      # only downloads games played since the last one. Saved even when a run fails, so
+      # an interrupted first backfill keeps the months it finished.
+      - uses: actions/cache/restore@v4
         with:
           path: data/processed
-          key: processed-${{ github.run_id }}
+          key: processed-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: processed-
 
       - name: Build site
@@ -60,6 +61,12 @@ jobs:
         run: |
           pip install -r requirements.txt
           python -m baseball_stats publish --out _site --statcast
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data/processed
+          key: processed-${{ github.run_id }}-${{ github.run_attempt }}
 
       - uses: actions/upload-pages-artifact@v3
         with:

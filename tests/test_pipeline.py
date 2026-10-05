@@ -137,3 +137,23 @@ def test_statcast_features(fake):
     assert later["csw_pct_car"].between(0, 1).all()
     assert later["fb_velo_car"].between(85, 100).all()
     assert b.loc[b["games_car"] >= 3, "xwoba_car"].notna().all()
+
+
+def test_suspended_game_listed_twice(fake):
+    """A suspended game appears on two dates with one game_pk; keep the finished one."""
+    pk = next(k for k, g in fake.games.items() if g["officialDate"] == "2025-04-02")
+    first = dict(fake.games[pk], officialDate="2025-04-01",
+                 status={"abstractGameState": "Final", "detailedState": "Suspended"})
+    orig_schedule = fake.schedule
+
+    def schedule(start, end, **kw):
+        data = orig_schedule(start, end, **kw)
+        data["dates"][0]["games"].append(first)
+        return data
+
+    collect.mlb_api.schedule = schedule
+    collect.collect_games(START, date(2025, 4, 5))
+    games = collect.storage.read("games")
+    row = games[games["game_pk"] == pk]
+    assert len(row) == 1 and row.iloc[0]["detailed_state"] == "Final"
+    assert row.iloc[0]["game_date"] == fake.games[pk]["officialDate"]

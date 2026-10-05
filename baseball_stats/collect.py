@@ -30,24 +30,45 @@ def played_games(games: pd.DataFrame) -> pd.DataFrame:
     return games[mask]
 
 
+def dedupe_games(games: pd.DataFrame) -> pd.DataFrame:
+    """One row per game_pk.
+
+    A suspended game is listed on its original date and again on the day it's finished,
+    under the same game_pk: keep the finished ("Final") listing, else the latest one.
+    """
+    if games.empty:
+        return games
+    order = games.assign(_final=(games["status"] == "Final").astype(int))
+    order = order.sort_values(["_final", "game_date"], kind="mergesort")
+    return order.drop_duplicates("game_pk", keep="last").drop(columns="_final").reset_index(drop=True)
+
+
 def collect_games(start: date, end: date, *, game_type: str = "R",
                   skip_existing: bool = True) -> dict[str, pd.DataFrame]:
     """Fetch schedule + boxscores for finished games in [start, end] and upsert them.
 
-    With ``skip_existing`` (default), box scores already in ``batter_games`` aren't
-    downloaded again, so a daily run only fetches the new games.
+    Works a month at a time and saves after each month, so an interrupted backfill
+    keeps what it downloaded. With ``skip_existing`` (default), box scores already in
+    ``batter_games`` aren't downloaded again, so a daily run only fetches new games.
     """
-    game_rows, lineup_rows = [], []
-    today = date.today()
+    out: dict[str, pd.DataFrame] = {}
     for s, e in _month_chunks(start, end):
-        log.info("schedule %s..%s", s, e)
-        data = mlb_api.schedule(s, e, game_type=game_type, cache=e < today - timedelta(days=1))
-        g, lu = parse.parse_schedule(data)
-        game_rows += g
-        lineup_rows += lu
-    games = pd.DataFrame(game_rows)
-    if games.empty:
+        out = _collect_chunk(s, e, game_type=game_type, skip_existing=skip_existing) or out
+    if not out:
         log.warning("no games found in %s..%s", start, end)
+        return out
+    out["players"] = update_players(out["batter_games"], out["pitcher_games"])
+    return out
+
+
+def _collect_chunk(start: date, end: date, *, game_type: str,
+                   skip_existing: bool) -> dict[str, pd.DataFrame]:
+    log.info("schedule %s..%s", start, end)
+    data = mlb_api.schedule(start, end, game_type=game_type,
+                            cache=end < date.today() - timedelta(days=1))
+    game_rows, lineup_rows = parse.parse_schedule(data)
+    games = dedupe_games(pd.DataFrame(game_rows))
+    if games.empty:
         return {}
 
     done = played_games(games)
@@ -66,7 +87,7 @@ def collect_games(start: date, end: date, *, game_type: str = "R",
 
     # Boxscore officials are authoritative for finished games.
     if extras:
-        ex = pd.DataFrame(extras).set_index("game_pk")
+        ex = pd.DataFrame(extras).drop_duplicates("game_pk").set_index("game_pk")
         g = games.set_index("game_pk")
         for col in ("hp_umpire_id", "hp_umpire"):
             g.loc[ex.index, col] = ex[col].where(ex[col].notna(), g.loc[ex.index, col])
@@ -92,9 +113,7 @@ def collect_games(start: date, end: date, *, game_type: str = "R",
         "batter_games": storage.upsert("batter_games", bat_df),
         "pitcher_games": storage.upsert("pitcher_games", pit_df),
     }
-    out["players"] = update_players(out["batter_games"], out["pitcher_games"])
-    log.info("stored %d new games, %d batter rows, %d pitcher rows",
-             len(done), len(bat_df), len(pit_df))
+    log.info("%s..%s: stored %d new games", start, end, len(done))
     return out
 
 
