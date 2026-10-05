@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from . import collect, features, mlb_api, model, odds, slate, storage
+from . import collect, features, mlb_api, model, odds, slate, storage, tracking
 
 log = logging.getLogger(__name__)
 
@@ -109,18 +109,7 @@ def book_lines(entries: list[dict] | None, pmf: np.ndarray) -> list[dict] | None
     """DraftKings lines for one player, with the model's chance and expected value per side."""
     if not entries:
         return None
-    out = []
-    for e in entries:
-        p = float(model.p_over(pmf[None, :], e["line"])[0])
-        do, du = odds.american_to_decimal(e.get("over")), odds.american_to_decimal(e.get("under"))
-        out.append({
-            **e,
-            "p_model": p,
-            "p_book": odds.no_vig_over(e.get("over"), e.get("under")),
-            "ev_over": p * do - 1 if do else None,
-            "ev_under": (1 - p) * du - 1 if du else None,
-        })
-    return out
+    return [{**e, **tracking.line_values(e, pmf)} for e in entries]
 
 
 def _pitcher_json(row: pd.Series, mu: float, pmf: np.ndarray, names: dict) -> dict:
@@ -265,6 +254,8 @@ def publish(out: str | Path, *, history_start: date | None = None,
         events, odds_status = odds.fetch_props(s["games"], now=now)
         props = odds.props_by_player(events, players_by_game)
         log.info("odds: %s", odds_status)
+        added = tracking.log_snapshots(s, models, props, now)
+        log.info("price log: %d new snapshot rows", len(added))
 
     stored = storage.read("games")
     final = stored[stored["status"] == "Final"] if not stored.empty else stored

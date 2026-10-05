@@ -117,6 +117,7 @@ def test_props_matched_to_players():
     events, _ = odds.fetch_props(_games(api), now=NOW, api_key="k", session=api)
     props = odds.props_by_player(events, {100: [(7, "Pitcher 0"), (8, "José Ramírez")]})
     assert props[(100, 7, "pitcher")] == [
-        {"line": 5.5, "over": -120, "under": 100, "updated": None}]
+        {"line": 5.5, "over": -120, "under": 100, "updated": None,
+         "fetched_at": NOW.isoformat(timespec="seconds")}]
     assert props[(100, 8, "batter")][0]["over"] == 105
     assert odds.no_vig_over(-120, 100) == pytest.approx((1 / (1 + 100 / 120)) / (1 / (1 + 100 / 120) + 0.5))

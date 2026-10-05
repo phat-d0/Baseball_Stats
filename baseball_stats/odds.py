@@ -12,9 +12,13 @@ Phones never call the API; only the publish job does, under a strict budget:
   fixed at the day's first run. On the free plan (500/month) that's about 15 credits
   a day, enough to price ~7 games once; a bigger plan automatically buys more games
   and more refreshes.
-* Within the allowance, games are priced soonest first pitch first, only within
-  ``WINDOW_HOURS`` of first pitch, and a game is re-priced at most every
-  ``EVENT_REFRESH_HOURS``. Unpriced games come before refreshes.
+* Within the allowance, games are priced only within ``WINDOW_HOURS`` of first pitch.
+  A game is re-priced at most every ``EVENT_REFRESH_HOURS``, tightening to every
+  ``FINAL_REFRESH_MINUTES`` in the last ``FINAL_HOURS`` (when lineups post and lines
+  move), plus one closing pull once inside ``CLOSE_MINUTES`` of first pitch.
+* When the allowance is short: closing pulls for games already priced come first (a
+  graded pick with a closing price is worth more than one more ungraded game), then
+  games not priced yet, then ordinary refreshes; soonest first pitch first within each.
 * ``ODDS_API_MONTHLY_CAP`` (optional) limits what this app may spend per month, e.g.
   when the same key also feeds the soccer app.
 * The reset day comes from ``ODDS_API_RESET_DAY`` (default 1) and is learned
@@ -50,7 +54,10 @@ BOOKMAKER_NAME = "DraftKings"
 MARKETS = {"pitcher_strikeouts": "pitcher", "batter_hits_runs_rbis": "batter"}
 RESERVE_CREDITS = 20  # never spend below this
 WINDOW_HOURS = 8.0  # only price games starting within this many hours
-EVENT_REFRESH_HOURS = 2.0  # re-price a game at most this often
+EVENT_REFRESH_HOURS = 2.0  # re-price a game at most this often...
+FINAL_HOURS = 3.0  # ...except in its last hours before first pitch,
+FINAL_REFRESH_MINUTES = 30  # when it's re-priced this often
+CLOSE_MINUTES = 45  # one closing pull inside this many minutes of first pitch
 DEFAULT_EVENT_COST = len(MARKETS)
 EASTERN = ZoneInfo("America/New_York")
 
@@ -227,6 +234,24 @@ def no_vig_over(over: float | None, under: float | None) -> float | None:
 # --------------------------------------------------------------------------- #
 
 
+CLOSING, UNPRICED, REFRESH = 0, 1, 2
+
+
+def fetch_priority(start: pd.Timestamp, last: pd.Timestamp | None,
+                   now: pd.Timestamp) -> int | None:
+    """Why a game should be priced now (lower = more urgent), or None if it shouldn't."""
+    minutes = (start - now) / pd.Timedelta(minutes=1)
+    if minutes <= 0 or minutes > WINDOW_HOURS * 60:
+        return None
+    if last is None:
+        return UNPRICED
+    if minutes <= CLOSE_MINUTES:
+        closed = (start - last) / pd.Timedelta(minutes=1) <= CLOSE_MINUTES
+        return None if closed else CLOSING  # at most one pull inside the closing window
+    gap = FINAL_REFRESH_MINUTES if minutes <= FINAL_HOURS * 60 else EVENT_REFRESH_HOURS * 60
+    return REFRESH if (now - last) / pd.Timedelta(minutes=1) >= gap else None
+
+
 def _headers(resp: requests.Response) -> tuple[int | None, int | None]:
     left, last = resp.headers.get("x-requests-remaining"), resp.headers.get("x-requests-last")
     return (int(float(left)) if left else None, int(float(last)) if last else None)
@@ -297,13 +322,10 @@ def fetch_props(games: pd.DataFrame, *, now: datetime, api_key: str | None = Non
 
     due = []
     for pk, ev in matched.items():
-        until = (starts[pk] - nowts) / pd.Timedelta(hours=1)
         last = last_fetch(ev)
-        if until <= 0 or until > WINDOW_HOURS:
-            continue
-        if last is not None and (nowts - last) / pd.Timedelta(hours=1) < EVENT_REFRESH_HOURS:
-            continue
-        due.append((last is not None, last or nowts, starts[pk], pk, ev))
+        prio = fetch_priority(starts[pk], last, nowts)
+        if prio is not None:
+            due.append((prio, last if last is not None else nowts, starts[pk], pk, ev))
     due.sort(key=lambda x: (x[0], x[1], x[2]))
 
     for _, _, _, pk, ev in due:
@@ -356,11 +378,18 @@ def _cached(games, ledger: Ledger, status: OddsStatus,
     return out, status
 
 
-def props_by_player(events: dict[int, dict], players_by_game: dict[int, list[tuple[int, str]]]
+def props_by_player(events: dict[int, dict], players_by_game: dict[int, list[tuple[int, str]]],
+                    fetched: dict[str, str] | None = None
                     ) -> dict[tuple[int, int, str], list[dict]]:
-    """(game_pk, player_id, kind) -> list of {line, over, under, updated}."""
+    """(game_pk, player_id, kind) -> list of {line, over, under, updated, fetched_at}.
+
+    ``fetched_at`` is when this app downloaded the game's prices (from the ledger);
+    ``updated`` is DraftKings' own last-update time.
+    """
+    fetched = Ledger.load().fetched if fetched is None else fetched
     out: dict[tuple[int, int, str], list[dict]] = {}
     for pk, ev in events.items():
+        fetched_at = fetched.get(ev.get("id"))
         idx = PlayerIndex(players_by_game.get(pk, []))
         for row in parse_props(ev):
             pid = idx.find(row["player"])
@@ -368,7 +397,7 @@ def props_by_player(events: dict[int, dict], players_by_game: dict[int, list[tup
                 continue
             out.setdefault((pk, pid, row["kind"]), []).append(
                 {"line": row["line"], "over": row.get("over"), "under": row.get("under"),
-                 "updated": row.get("updated")})
+                 "updated": row.get("updated"), "fetched_at": fetched_at})
     for v in out.values():
         v.sort(key=lambda r: r["line"])
     return out
