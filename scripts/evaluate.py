@@ -147,15 +147,25 @@ def baseline_variant(kind: str):
     return _pmf_variant(lambda f: (model.baseline(f.test, kind), model.baseline(f.calib, kind)))
 
 
+_PA_CACHE: dict = {}
+
+
 def _pa_models(f: Fold, stay: bool = True):
+    """Outcome/stay models trained on the fold's plate appearances (shared by variants)."""
     if f.pa.empty:
         raise RuntimeError("no plate appearances before this fold")
-    outcome = pa_model.OutcomeModel().fit(f.pa, f.built)
-    sampler = pa_model.PitchSampler().fit(f.pa)
-    stay_m = pa_model.StayModel().fit(f.pa, f.built) if stay else None
-    m = simulate.lineup_matchups(f.test, f.built["batter_hrr"], f.players)
-    probs = simulate.lineup_probs(m, outcome, f.built)
-    return outcome, sampler, stay_m, probs
+    key = (f.start, f.kind)
+    if key not in _PA_CACHE:
+        t0 = time.time()
+        outcome = pa_model.OutcomeModel().fit(f.pa, f.built)
+        sampler = pa_model.PitchSampler().fit(f.pa)
+        stay_m = pa_model.StayModel().fit(f.pa, f.built)
+        m = simulate.lineup_matchups(f.test, f.built["batter_hrr"], f.players)
+        probs = simulate.lineup_probs(m, outcome, f.built)
+        _PA_CACHE.clear()
+        _PA_CACHE[key] = (outcome, sampler, stay_m, probs)
+        print(f"  trained PA models on {len(f.pa)} plate appearances in {time.time() - t0:.0f}s", flush=True)
+    return _PA_CACHE[key]
 
 
 def _fallback(f: Fold):
