@@ -157,3 +157,27 @@ def test_suspended_game_listed_twice(fake):
     row = games[games["game_pk"] == pk]
     assert len(row) == 1 and row.iloc[0]["detailed_state"] == "Final"
     assert row.iloc[0]["game_date"] == fake.games[pk]["officialDate"]
+
+
+def test_log5_and_pa_vs_starter():
+    from baseball_stats.features import log5, pa_vs_starter
+    assert log5(pd.Series([0.3]), pd.Series([0.3]), 0.22)[0] == pytest.approx(0.394, abs=0.001)
+    # League-average pitcher leaves the batter's rate unchanged.
+    assert log5(pd.Series([0.25]), pd.Series([0.22]), 0.22)[0] == pytest.approx(0.25)
+    pa = pa_vs_starter(pd.Series([24.0] * 9), pd.Series(range(1, 10), dtype=float))
+    assert list(pa) == [3, 3, 3, 3, 3, 3, 2, 2, 2] and pa.sum() == 24
+
+
+def test_matchup_scores(fake):
+    out = _build(fake)
+    b, p = out["batter_hrr"], out["pitcher_k"]
+    later = b[(b["games_car"] > 5) & b["is_starter"]]
+    for col in ("m_k", "m_h", "m_onbase", "pa_vs_sp", "ahead_onbase", "behind_onbase"):
+        assert later[col].notna().all(), col
+    assert later["m_k"].between(0, 1).all()
+    lp = p[p["starts_car"] > 2]
+    assert lp["exp_k_matchup"].notna().all() and (lp["matchup_batters"] == 9).all()
+    # exp_k_matchup = sum over the lineup of m_k * pa_vs_sp.
+    row = lp.iloc[-1]
+    lineup = b[(b["game_pk"] == row["game_pk"]) & (b["opp_starter_id"] == row["player_id"])]
+    assert row["exp_k_matchup"] == pytest.approx((lineup["m_k"] * lineup["pa_vs_sp"]).sum())

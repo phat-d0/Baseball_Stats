@@ -70,6 +70,25 @@ def shrink(num: pd.Series, den: pd.Series, prior: pd.Series | float, k: float) -
     return (num + prior * k) / (den + k)
 
 
+def log5(batter: pd.Series, pitcher: pd.Series, league: pd.Series | float) -> pd.Series:
+    """Rate for this batter vs this pitcher (odds-ratio / "log5" method).
+
+    Combines the batter's rate, the pitcher's rate allowed and the league rate:
+    a .300 strikeout batter vs a .300 strikeout pitcher in a .220 league -> ~.39.
+    """
+    def odds(x):
+        x = np.clip(x, 1e-3, 1 - 1e-3)
+        return x / (1 - x)
+    o = odds(batter) * odds(pitcher) / odds(league)
+    return o / (1 + o)
+
+
+def pa_vs_starter(exp_bf: pd.Series, slot: pd.Series) -> pd.Series:
+    """Plate appearances lineup slot ``slot`` gets against a starter who faces ``exp_bf``."""
+    n = exp_bf.round()
+    return (((n - slot) // 9) + 1).clip(lower=0).where(slot.notna() & n.notna())
+
+
 def league_prior_rate(df: pd.DataFrame, num: str, den: str, default: float) -> pd.Series:
     """League-wide num/den using only dates before each row (leak-free)."""
     daily = df.groupby("game_date")[[num, den]].sum().sort_index()
@@ -236,13 +255,30 @@ def batter_base(bat: pd.DataFrame, players: pd.DataFrame, sc_bat: pd.DataFrame,
                                "_hrr", "_pa", 0.33)
     feats["hrr_per_pa_shr"] = shrink(w["hrr_car"], w["pa_car"], lg_hrr, 200)
     feats["k_pct_shr"] = shrink(w["so_car"], w["pa_car"], league_k, 150)
+    played = b.assign(_pa=b["pa"].fillna(0), _h=b["h"].fillna(0), _bb=b["bb"].fillna(0),
+                      _hr=b["hr"].fillna(0))
+    feats["lg_k_pa"] = league_k
+    feats["lg_h_pa"] = league_prior_rate(played, "_h", "_pa", 0.22)
+    feats["lg_bb_pa"] = league_prior_rate(played, "_bb", "_pa", 0.08)
+    feats["lg_hr_pa"] = league_prior_rate(played, "_hr", "_pa", 0.03)
+    feats["h_per_pa_shr"] = shrink(w["h_car"], w["pa_car"], feats["lg_h_pa"], 250)
+    feats["bb_pct_shr"] = shrink(w["bb_car"], w["pa_car"], feats["lg_bb_pa"], 150)
+    feats["hr_per_pa_shr"] = shrink(w["hr_car"], w["pa_car"], feats["lg_hr_pa"], 300)
+    feats["onbase_shr"] = shrink(w["h_car"] + w["bb_car"], w["pa_car"],
+                                 feats["lg_h_pa"] + feats["lg_bb_pa"], 200)
+
+    # Typical plate appearances for this lineup slot (league-wide, prior days only).
+    slot = b.assign(batting_order=b["batting_order"].fillna(0))
+    ps = prior_sums(slot, ["batting_order"], ["pa", "g"], None, suffix="slot")
+    feats["slot_pa_exp"] = ratio(ps["pa_slot"], ps["g_slot"]).where(b["batting_order"].notna())
 
     # Splits vs the hand of today's opposing starter (career to date).
     side = b.assign(opp_sp_hand=b["opp_sp_hand"].fillna("R"))
-    vh = prior_sums(side, ["player_id", "opp_sp_hand"], ["pa", "hrr", "so"], None, suffix="vh")
+    vh = prior_sums(side, ["player_id", "opp_sp_hand"], ["pa", "hrr", "so", "h"], None, suffix="vh")
     feats["pa_vs_hand"] = vh["pa_vh"]
     feats["hrr_per_pa_vs_hand_shr"] = shrink(vh["hrr_vh"], vh["pa_vh"], feats["hrr_per_pa_shr"], 150)
     feats["k_pct_vs_hand_shr"] = shrink(vh["so_vh"], vh["pa_vh"], feats["k_pct_shr"], 100)
+    feats["h_per_pa_vs_hand_shr"] = shrink(vh["h_vh"], vh["pa_vh"], feats["h_per_pa_shr"], 150)
 
     # Rest / recent usage.
     prev = b.groupby("player_id")["game_date"].shift(1)
@@ -289,9 +325,13 @@ def pitcher_base(pit: pd.DataFrame, players: pd.DataFrame, sc_pit: pd.DataFrame,
     allp["g"] = allp["_played"]
 
     # Career K% over every appearance and days of rest since the last one.
-    car = prior_sums(allp, ["player_id"], ["k", "bf"], None, suffix="all")
+    car = prior_sums(allp, ["player_id"], ["k", "bf", "h", "bb", "hr"], None, suffix="all")
     allp["k_pct_all_car"] = ratio(car["k_all"], car["bf_all"])
     allp["k_pct_shr"] = shrink(car["k_all"], car["bf_all"], league_k, 200)
+    # Rates allowed, regressed to the league (used by the log5 matchup scores).
+    for stat, default, k in (("h", 0.22, 300), ("bb", 0.08, 200), ("hr", 0.03, 400)):
+        lg = league_prior_rate(allp, stat, "bf", default)
+        allp[f"{stat}_per_bf_shr"] = shrink(car[f"{stat}_all"], car["bf_all"], lg, k)
     prev = allp.groupby("player_id")["game_date"].shift(1)
     allp["days_rest"] = _as_of_day_start(
         allp, pd.DataFrame({"d": (allp["game_date"] - prev).dt.days}), ["player_id"])["d"]
@@ -314,6 +354,9 @@ def pitcher_base(pit: pd.DataFrame, players: pd.DataFrame, sc_pit: pd.DataFrame,
     last = s.groupby("player_id")[["pitches", "outs", "k"]].shift(1)
     last = _as_of_day_start(s, last, ["player_id"])
     feats[["last_pitches", "last_outs", "last_k"]] = last.to_numpy()
+    # Batters he's expected to face: recent workload, else season/career, else typical.
+    feats["exp_bf"] = (feats["bf_per_start_l10"].fillna(feats["bf_per_start_szn"])
+                       .fillna(feats["bf_per_start_car"]).fillna(22.0))
 
     if not sc_pit.empty:
         sc = s[["game_pk", "player_id"]].merge(
@@ -340,11 +383,82 @@ def pitcher_base(pit: pd.DataFrame, players: pd.DataFrame, sc_pit: pd.DataFrame,
                 / 365.25)
     id_cols = ["game_pk", "game_date", "season", "player_id", "player_name", "team_id",
                "opp_team_id", "is_home", "venue_id", "pitch_hand", "age",
-               "k_pct_all_car", "k_pct_shr", "days_rest"]
+               "k_pct_all_car", "k_pct_shr", "h_per_bf_shr", "bb_per_bf_shr", "hr_per_bf_shr",
+               "days_rest"]
     targets = ["k", "outs", "bf", "pitches"]
     t = s[targets].where(s["_played"] == 1)
     t.columns = [f"target_{c}" for c in targets]
     return pd.concat([s[id_cols], feats, t], axis=1)
+
+
+MATCHUP_RATES = {  # score: (batter rate, starter's rate allowed, league rate)
+    "k": ("k_pct_vs_hand_shr", "opp_sp_k_pct_shr", "lg_k_pa"),
+    "h": ("h_per_pa_vs_hand_shr", "opp_sp_h_per_bf_shr", "lg_h_pa"),
+    "bb": ("bb_pct_shr", "opp_sp_bb_per_bf_shr", "lg_bb_pa"),
+    "hr": ("hr_per_pa_shr", "opp_sp_hr_per_bf_shr", "lg_hr_pa"),
+}
+
+
+def matchups(bf: pd.DataFrame, pf: pd.DataFrame) -> pd.DataFrame:
+    """Batter-vs-today's-starter scores, expected PAs against him, and lineup neighbours.
+
+    * ``m_k``/``m_h``/``m_bb``/``m_hr``: log5 per-PA rates for this batter vs this starter.
+    * ``pa_vs_sp``: PAs his lineup slot gets before the starter's expected exit.
+    * ``exp_*_vs_sp``: those two multiplied (expected hits / times on base vs the starter).
+    * ``ahead_onbase`` / ``behind_onbase``: on-base rates of the two hitters before him
+      (runners for his RBIs) and after him (who drive him in for runs).
+    """
+    sp = pf[["game_pk", "player_id", "k_pct_shr", "h_per_bf_shr", "bb_per_bf_shr",
+             "hr_per_bf_shr", "exp_bf"]]
+    sp = sp.rename(columns={"player_id": "opp_starter_id",
+                            **{c: f"opp_sp_{c}" for c in sp.columns[2:]}})
+    b = bf.merge(sp, on=["game_pk", "opp_starter_id"], how="left")
+    for name, (bat, pit, lg) in MATCHUP_RATES.items():
+        b[f"m_{name}"] = log5(b[bat], b[pit], b[lg])
+    b["m_onbase"] = b["m_h"] + b["m_bb"]
+    b["pa_vs_sp"] = pa_vs_starter(b["opp_sp_exp_bf"], b["batting_order"])
+    b["exp_h_vs_sp"] = b["m_h"] * b["pa_vs_sp"]
+    b["exp_onbase_vs_sp"] = b["m_onbase"] * b["pa_vs_sp"]
+
+    # Lineup neighbours (starters only; slots wrap around 9 -> 1).
+    st = b[b["is_starter"].astype(bool) & b["batting_order"].between(1, 9)]
+    ob = st.set_index(["game_pk", "team_id", "batting_order"])["onbase_shr"]
+    ob = ob[~ob.index.duplicated()]
+    def neighbours(offsets):
+        vals = []
+        for off in offsets:
+            slot = ((b["batting_order"] - 1 + off) % 9) + 1
+            idx = pd.MultiIndex.from_arrays([b["game_pk"], b["team_id"], slot])
+            vals.append(ob.reindex(idx).to_numpy())
+        return np.nanmean(np.vstack(vals), axis=0)
+    with np.errstate(all="ignore"), __import__("warnings").catch_warnings():
+        __import__("warnings").simplefilter("ignore", RuntimeWarning)
+        b["ahead_onbase"] = neighbours((-1, -2))
+        b["behind_onbase"] = neighbours((1, 2))
+    starter = b["is_starter"].astype(bool)
+    b.loc[~starter, ["ahead_onbase", "behind_onbase"]] = np.nan
+    return b
+
+
+def lineup_matchup(bf: pd.DataFrame) -> pd.DataFrame:
+    """The opposing starting lineup scored against each starter (from :func:`matchups`).
+
+    ``exp_k_matchup`` = sum over the nine hitters of (log5 strikeout chance vs him) x
+    (PAs that lineup slot gets before his expected exit): the strikeouts this lineup
+    should give him. ``lineup_k_log5`` is the average per-PA strikeout chance.
+    """
+    st = bf[bf["is_starter"].astype(bool) & bf["opp_starter_id"].notna()]
+    st = st.assign(_k=st["m_k"] * st["pa_vs_sp"], _ob=st["m_onbase"] * st["pa_vs_sp"],
+                   _hr=st["m_hr"] * st["pa_vs_sp"])
+    agg = st.groupby(["game_pk", "opp_starter_id"]).agg(
+        exp_k_matchup=("_k", "sum"),
+        lineup_k_log5=("m_k", "mean"),
+        exp_onbase_matchup=("_ob", "sum"),
+        exp_hr_matchup=("_hr", "sum"),
+        matchup_batters=("m_k", "count"),
+    ).reset_index().rename(columns={"opp_starter_id": "player_id"})
+    agg["player_id"] = agg["player_id"].astype(int)
+    return agg
 
 
 def lineup_strength(batter_feats: pd.DataFrame) -> pd.DataFrame:
@@ -404,6 +518,7 @@ def build_features(inputs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
 
     bf = batter_base(bat, players, sc_bat, league_k_bat)
     pf = pitcher_base(pit, players, sc_pit, league_k_pit)
+    bf = matchups(bf, pf)
 
     # ---- pitcher table: + opposing lineup / team, park, ump, weather, own team leash
     lineups = lineup_strength(bf).rename(columns={"team_id": "opp_team_id"})
@@ -412,6 +527,7 @@ def build_features(inputs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     opp_team.columns = ["game_pk", "opp_team_id"] + [f"opp_{c}" for c in opp_team.columns[2:]]
     own_team = team[["game_pk", "team_id"] + [c for c in team if c.startswith(("team_sp_outs", "team_rp"))]]
     pitcher_k = (pf.merge(lineups, on=["game_pk", "opp_team_id"], how="left")
+                   .merge(lineup_matchup(bf), on=["game_pk", "player_id"], how="left")
                    .merge(opp_team, on=["game_pk", "opp_team_id"], how="left")
                    .merge(own_team, on=["game_pk", "team_id"], how="left")
                    .merge(ctx[["game_pk", "park_so_factor", "ump_k_factor", "ump_games",
@@ -419,7 +535,7 @@ def build_features(inputs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
                    .merge(weather, on="game_pk", how="left"))
 
     # ---- batter table: + opposing starter, opposing staff, own offense, park, weather
-    sp_cols = ["k_pct_shr", "k_pct_l5", "k_pct_szn", "bb_pct_szn", "h_per_bf_szn",
+    sp_cols = ["k_pct_l5", "k_pct_szn", "bb_pct_szn", "h_per_bf_szn",
                "hr_per_bf_szn", "era_szn", "outs_per_start_l5", "outs_per_start_szn",
                "xwoba_allowed_szn", "xwoba_allowed_car", "whiff_pct_szn", "starts_car"]
     sp = pitcher_k[["game_pk", "player_id"] + [c for c in sp_cols if c in pitcher_k]]
