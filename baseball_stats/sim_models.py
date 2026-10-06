@@ -215,3 +215,104 @@ def holdout_record(name: str, pa: pd.DataFrame, built: dict, hist: pd.DataFrame,
 
 def now_utc() -> datetime:
     return datetime.now(UTC)
+
+
+# --------------------------------------------------------------------------- #
+# Hitters: whole-game simulation (Phase 2)
+# --------------------------------------------------------------------------- #
+
+def reliever_probs(bat: pd.DataFrame, outcome: pa_model.OutcomeModel, ctx: dict) -> np.ndarray:
+    """Each hitter vs a composite reliever from the opposing bullpen's regressed rates
+    (handedness left blank). Returns (len(bat), 7)."""
+    from .features import log5
+    m = pd.DataFrame({"game_pk": bat["game_pk"].to_numpy(), "batter": bat["player_id"].to_numpy(),
+                      "pitcher": -1, "stand": bat["bat_side"].fillna("R").to_numpy(),
+                      "p_throws": None, "times_through_order": 1,
+                      "batter_is_home": bat["is_home"].astype(bool).to_numpy()})
+    x = pa_model.matchup_features(m, ctx)
+    lg_bb, lg_hr = x.get("lg_bb", 0.08), x.get("lg_hr", 0.03)
+    rp_k = pd.Series(bat.get("opp_team_rp_k_pct_l15", np.nan), index=bat.index).to_numpy()
+    rp_ob = pd.Series(bat.get("opp_team_rp_onbase_pct_l15", np.nan), index=bat.index).to_numpy()
+    x["p_k"] = np.where(np.isfinite(rp_k), rp_k, x.get("lg_k", 0.22))
+    x["p_bb"] = lg_bb
+    x["p_h"] = np.where(np.isfinite(rp_ob), np.maximum(rp_ob - lg_bb, 0.1), x.get("lg_h", 0.22))
+    x["p_hr"] = lg_hr
+    for name, b, p, lg in (("k", "b_k_vs_hand", "p_k", "lg_k"), ("h", "b_h_vs_hand", "p_h", "lg_h"),
+                           ("bb", "b_bb", "p_bb", "lg_bb"), ("hr", "b_hr", "p_hr", "lg_hr")):
+        if b in x and lg in x:
+            x[f"m_{name}"] = log5(x[b], x[p], x[lg])
+    x["platoon_adv"] = np.nan
+    return outcome.predict_proba(x)
+
+
+@dataclass
+class GameSimH(_Base):
+    """H+R+RBI from simulating each whole game (both lineups) with the PA models."""
+
+    stay: pa_model.StayModel | None = None
+    sampler: pa_model.PitchSampler | None = None
+    transitions: object = None
+    stay_prob: np.ndarray | None = None
+    n_sims: int = 10_000
+    name: str = "pa_sim"
+    last_parts: dict | None = field(default=None, repr=False)
+
+    def distribution(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        from . import game_sim
+        mu, dist = self.fallback.distribution(df)
+        mu, dist = mu.copy(), dist.copy()
+        H_MAX = model.MAX_COUNT["batter"]
+        parts = {}
+        games = set(df["game_pk"].astype(int))
+        allbat = self.ctx["batter_hrr"]
+        bat = allbat[allbat["game_pk"].isin(games) & allbat["is_starter"].astype(bool)
+                     & allbat["batting_order"].between(1, 9)].drop_duplicates(["game_pk", "team_id", "batting_order"])
+        sp = self.ctx["pitcher_k"]
+        sp = sp[sp["game_pk"].isin(games)].drop_duplicates(["game_pk", "is_home"])
+        if bat.empty or sp.empty:
+            return mu, dist
+        probs_sp = simulate.lineup_probs(simulate.lineup_matchups(sp, bat, self.players), self.outcome, self.ctx)
+        rp = reliever_probs(bat, self.outcome, self.ctx)
+        rp_by = {}
+        for (r, row) in zip(rp, bat.itertuples(index=False)):
+            rp_by.setdefault((int(row.game_pk), bool(row.is_home)), np.full((9, rp.shape[1]), np.nan))[
+                int(row.batting_order) - 1] = r
+        pre = pa_model.starter_pregame(self.ctx).set_index(["game_pk", "pitcher"])
+        pre_cols = [c for c in self.stay.columns if c not in pa_model.STAY_INGAME]
+        ratio = pa_model.pitcher_ppb_ratio(sp, self.sampler.league_ppb)
+        ratio.index = pd.MultiIndex.from_arrays([sp["game_pk"].astype(int), sp["player_id"].astype(int)])
+        lineup = {(int(r.game_pk), bool(r.is_home), int(r.batting_order)): int(r.player_id)
+                  for r in bat.itertuples(index=False)}
+        row_of = {(int(pk), int(pid)): i for i, (pk, pid) in enumerate(zip(df["game_pk"], df["player_id"]))}
+        for pk in sorted(games):
+            s = sp[sp["game_pk"] == pk]
+            if len(s) != 2:
+                continue
+            ids = {bool(r.is_home): int(r.player_id) for r in s.itertuples(index=False)}
+            teams = {}
+            for home in (False, True):
+                opp_sp = ids[not home]
+                ps = probs_sp.get((pk, opp_sp))
+                pr = rp_by.get((pk, home))
+                if ps is None or pr is None or np.isnan(pr).any():
+                    break
+                key = (pk, ids[home])
+                row = pre.loc[key].reindex(pre_cols) if key in pre.index else pd.Series(np.nan, index=pre_cols)
+                teams[home] = game_sim.Team(probs_sp=ps, probs_rp=pr, exit_grid=simulate.stay_grid(self.stay, row),
+                                            ppb_ratio=float(ratio.get(key, 1.0)))
+            if len(teams) != 2:
+                continue
+            sim = game_sim.simulate_game(teams[False], teams[True], self.transitions, self.stay_prob,
+                                         self.sampler, seed=game_sim.seed_for(pk), n_sims=self.n_sims)
+            for home, side in ((False, "away"), (True, "home")):
+                for slot in range(9):
+                    pid = lineup.get((pk, home, slot + 1))
+                    i = row_of.get((pk, pid))
+                    if i is None:
+                        continue
+                    d, p = game_sim.hrr_distribution(sim[side], slot, H_MAX)
+                    dist[i] = d
+                    mu[i] = float((d * np.arange(len(d))).sum())
+                    parts[(pk, pid)] = p
+        self.last_parts = parts
+        return mu, dist

@@ -160,8 +160,10 @@ def _pa_models(f: Fold, stay: bool = True):
         outcome = pa_model.OutcomeModel().fit(f.pa, f.built)
         sampler = pa_model.PitchSampler().fit(f.pa)
         stay_m = pa_model.StayModel().fit(f.pa, f.built)
-        m = simulate.lineup_matchups(f.test, f.built["batter_hrr"], f.players)
-        probs = simulate.lineup_probs(m, outcome, f.built)
+        probs = {}
+        if f.kind == "pitcher":  # the lineups facing each test start
+            m = simulate.lineup_matchups(f.test, f.built["batter_hrr"], f.players)
+            probs = simulate.lineup_probs(m, outcome, f.built)
         _PA_CACHE.clear()
         _PA_CACHE[key] = (outcome, sampler, stay_m, probs)
         print(f"  trained PA models on {len(f.pa)} plate appearances in {time.time() - t0:.0f}s", flush=True)
@@ -193,10 +195,28 @@ def pa_simple_variant():
     return lambda f: _sim_model(f, "pa_simple").distribution(f.test)
 
 
+def pa_sim_variant():
+    """Hitters: simulate each whole game with the plate-appearance models."""
+    def fn(f: Fold):
+        from baseball_stats import game_sim
+        outcome, sampler, stay, _ = _pa_models(f)
+        fb = model.CountModel("batter").fit(f.train)
+        fb.alpha = model.fit_alpha(f.calib["target_hrr"].to_numpy(), fb.predict(f.calib))
+        bg = storage.read("batter_games")
+        m = sim_models.GameSimH(
+            outcome=outcome, fallback=fb, players=f.players, stay=stay, sampler=sampler,
+            transitions=game_sim.Transitions.from_pa(f.pa),
+            stay_prob=game_sim.stay_in_lineup(f.pa, bg[bg["game_pk"].isin(f.pa["game_pk"])]),
+            n_sims=f.sims)
+        return m.for_slate(f.built, f.players).distribution(f.test)
+    return fn
+
+
 def variants_for(kind: str, names: list[str] | None = None) -> dict:
     allv = {
         "batter": {"season_avg": baseline_variant("batter"), "current": gbm_variant("batter"),
-                   "components": components_variant(**model.PARAMS["batter"])},
+                   "components": components_variant(**model.PARAMS["batter"]),
+                   "pa_sim": pa_sim_variant()},
         "pitcher": {"season_avg": baseline_variant("pitcher"), "current": gbm_variant("pitcher"),
                     "pa_simple": pa_simple_variant(), "pa_seq": pa_seq_variant()},
     }[kind]

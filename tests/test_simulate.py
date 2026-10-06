@@ -140,3 +140,65 @@ def test_saved_model_with_other_sklearn_is_retrained(pa_env, tmp_path, monkeypat
     _run(tmp_path, monkeypatch, "pa_simple")
     after = json.loads(stamp_path.read_text())
     assert after["sklearn"] != "0.0.1" and stamp_path.stat().st_mtime_ns != before
+
+
+# ---- hitters: whole-game simulation -----------------------------------------------
+
+from baseball_stats import game_sim  # noqa: E402
+
+
+def _team(per_slot):
+    """per_slot: 9 outcome names; every PA by that slot has that outcome."""
+    p = np.zeros((9, 3, len(OUTCOMES)))
+    for s, name in enumerate(per_slot):
+        p[s, :, OUTCOMES.index(name)] = 1.0
+    grid = np.zeros((simulate.MAX_BF, simulate.MAX_PITCHES // simulate.PITCH_STEP + 1,
+                     simulate.MAX_RUNNERS + 1))
+    return game_sim.Team(probs_sp=p, probs_rp=p[:, 0], exit_grid=grid)
+
+
+def test_forced_inning_credits():
+    away = _team(["BB", "BB", "BB", "HR", "K", "K", "K", "K", "K"])
+    home = _team(["K"] * 9)
+    sim = game_sim.simulate_game(away, home, game_sim.Transitions.simple_rules(), np.ones((9, 7)),
+                                 _sampler(), seed=1, n_sims=50, max_innings=1)
+    a = sim["away"]
+    assert (a["H"][:, 3] == 1).all() and (a["RBI"][:, 3] == 4).all() and (a["R"][:, 3] == 1).all()
+    assert (a["R"][:, :3] == 1).all() and (a["H"][:, :3] == 0).all()
+    assert (sim["score"][:, 0] == 4).all() and (sim["score"][:, 1] == 0).all()
+
+
+def test_team_runs_equal_score_and_seeds():
+    rng = np.random.default_rng(0)
+    def random_team():
+        p = rng.dirichlet(np.ones(len(OUTCOMES)) * 3, size=(9, 3))
+        grid = np.full((simulate.MAX_BF, simulate.MAX_PITCHES // simulate.PITCH_STEP + 1,
+                        simulate.MAX_RUNNERS + 1), 0.05)
+        return game_sim.Team(probs_sp=p, probs_rp=p[:, 0], exit_grid=grid)
+    away, home = random_team(), random_team()
+    stay = np.tile(np.array([1, 1, 1, 0.9, 0.7, 0.5, 0.4]), (9, 1))
+    args = (away, home, game_sim.Transitions.simple_rules(), stay, _sampler())
+    a = game_sim.simulate_game(*args, seed=5, n_sims=3000)
+    b = game_sim.simulate_game(*args, seed=5, n_sims=3000)
+    for side, col in (("away", 0), ("home", 1)):
+        assert (a[side]["R"].sum(axis=1) == a["score"][:, col]).all()
+        assert (a[side]["H"] == b[side]["H"]).all()
+    assert (a["score"][:, 0] != a["score"][:, 1]).mean() > 0.9  # extras decide most ties
+    dist, parts = game_sim.hrr_distribution(a["away"], 3, 8)
+    assert np.isclose(dist.sum(), 1) and (dist > 0).all() and parts["H"] > 0
+
+
+def test_transitions_from_data(fake):
+    import pandas as pd
+    from baseball_stats import collect, pa_data
+    from datetime import date, timedelta
+    collect.collect_games(START, date(2025, 6, 14))
+    pa = pa_data.build(pd.concat([fake.pitches(START + timedelta(days=i)) for i in range(75)]),
+                       storage.read("batter_games"))
+    t = game_sim.Transitions.from_pa(pa)
+    assert np.allclose(t.cum[..., -1], 1.0)
+    sub = game_sim.stay_in_lineup(pa, storage.read("batter_games"))
+    assert sub.shape == (9, game_sim.MAX_TRIPS) and (sub[:, 0] > 0.99).all()
+    away, home = _team(["1B", "OUT", "BB", "HR", "K", "OUT", "2B", "K", "OUT"]), _team(["OUT"] * 9)
+    sim = game_sim.simulate_game(away, home, t, sub, _sampler(), seed=2, n_sims=500)
+    assert (sim["away"]["R"].sum(axis=1) == sim["score"][:, 0]).all()

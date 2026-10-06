@@ -121,14 +121,24 @@ def state_code(outs, on1, on2, on3) -> np.ndarray:
 
 
 def transitions_from(pa: pd.DataFrame) -> pd.DataFrame:
-    """Observed (outcome, state before) -> (state after, runs) for each PA."""
+    """Observed (outcome, state before) -> (state after, runs, RBIs) for each PA.
+
+    The last PA of a half-inning leads to END (three outs), except a walk-off: a game
+    ending on a scoring play in the bottom of the 9th or later isn't a third out, so
+    those rows are left out.
+    """
     p = pa.sort_values(["game_pk", "at_bat_number"])
     before = state_code(p["outs_before"], p["on_1b"], p["on_2b"], p["on_3b"])
     half = p["game_pk"].astype(str) + "-" + p["inning"].astype(str) + p["is_top"].astype(str)
     nxt = pd.Series(before, index=p.index).groupby(half.to_numpy()).shift(-1)
+    last_in_half = nxt.isna().to_numpy()
+    walk_off = (last_in_half & ~p["is_top"].astype(bool).to_numpy()
+                & (p["inning"].to_numpy() >= 9) & (p["runs_scored"].to_numpy() > 0))
     after = nxt.fillna(END).astype(int).to_numpy()
-    return pd.DataFrame({"outcome": p["outcome"].to_numpy(), "state": before,
-                         "next_state": after, "runs": p["runs_scored"].to_numpy()})
+    out = pd.DataFrame({"outcome": p["outcome"].to_numpy(), "state": before,
+                        "next_state": after, "runs": p["runs_scored"].to_numpy(),
+                        "rbi": p["rbi"].to_numpy()})
+    return out[~walk_off].reset_index(drop=True)
 
 
 def build_transitions(pa: pd.DataFrame, before=None) -> pd.DataFrame:
@@ -140,7 +150,7 @@ def build_transitions(pa: pd.DataFrame, before=None) -> pd.DataFrame:
     if before is not None:
         pa = pa[pd.to_datetime(pa["game_date"]) < pd.Timestamp(before)]
     t = transitions_from(pa)
-    counts = t.groupby(["outcome", "state", "next_state", "runs"]).size().rename("n").reset_index()
+    counts = t.groupby(["outcome", "state", "next_state", "runs", "rbi"]).size().rename("n").reset_index()
     counts["share"] = counts["n"] / counts.groupby(["outcome", "state"])["n"].transform("sum")
     return counts
 
