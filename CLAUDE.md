@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 Guidance for Claude sessions working in this repo. Read `docs/WORK_PLAN.md` first: it
-says what has been built, what the latest results are, and what to do next.
+says what has been built, what the latest results are, and what to do next. If you
+have a team role, read your brief in `docs/team/` next (see Team below).
 
 ## What this is
 
@@ -16,6 +17,40 @@ An MLB player-prop model with an iPhone web app (PWA):
 
 The owner is a bettor who wants honest numbers. They prefer recommendations to option
 lists, and they want results reported plainly, including bad ones.
+
+## Team (several Claude sessions at once)
+
+Work is split across sessions, each with a brief in `docs/team/`:
+
+| Role | Brief | Branch |
+|---|---|---|
+| Lead / Reviewer | `docs/team/lead.md` | the default branch |
+| Edge | `docs/team/edge.md` | `team/edge` |
+| Strikeouts | `docs/team/strikeouts.md` | `team/strikeouts` |
+| Hitters | `docs/team/hitters.md` | `team/hitters` |
+| UI Design | `docs/team/ui.md` | `team/ui` |
+
+If you were started with a role, read its brief before anything else. Rules for every
+role except Lead:
+
+1. **Never push to `claude/stoic-davinci-v4p6k9`** (it deploys the app). Work on your own
+   branch and open a pull request into it when a piece of work is finished and tested.
+   One topic per PR; keep PRs small enough to review.
+2. **Stay in your files.** The brief lists what you own. If you need a change in shared
+   code (`features.py`, `publish.py`, `tracking.py`, `model.py`, `web/app.js`), keep it
+   minimal, say so in the PR, and expect the Lead to sequence merges.
+3. **Before opening a PR:**
+   - `python -m pytest -q tests` passes.
+   - Model changes pass the walk-forward gate (see Conventions).
+   - App changes have phone-size screenshots in light and dark mode.
+4. **Credits:** only Edge may call The Odds API (through the Fetch historical prices
+   workflow), within a 15,000-credit budget until the Nov 5, 2026 reset, never letting
+   the shared balance fall below 25,000. Everyone else reuses the `odds-history` branch.
+5. **Results go in `docs/`** (your own write-up file, with numbers, including bad
+   results). Don't edit `docs/WORK_PLAN.md` or this file; propose changes in your PR
+   description and the Lead updates them.
+6. **Bring your branch up to date by merging the default branch in, never by rebasing**,
+   and before opening a PR. Keep 4-core CPU limits in mind (one heavy job at a time).
 
 ## Branches and publishing
 
