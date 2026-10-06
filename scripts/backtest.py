@@ -106,10 +106,12 @@ def predictions(months: list[str], sims: int) -> tuple[pd.DataFrame, dict]:
     return pd.concat(out, ignore_index=True), inputs
 
 
-def grades(prices: pd.DataFrame, pred: pd.DataFrame) -> pd.DataFrame:
-    """Rows shaped like the live price log's grades, so tracking.picks works on them."""
+def grades(prices: pd.DataFrame, pred: pd.DataFrame, raw: bool = True) -> pd.DataFrame:
+    """Rows shaped like the live price log's grades, so tracking.picks works on them.
+    ``raw``: edges from the model's own chance, not the blend."""
     g = prices.merge(pred, on=["game_pk", "player_id", "kind"], how="inner")
-    vals = [tracking.line_values({"line": r.line, "over": r.over, "under": r.under}, np.asarray(r.pmf))
+    vals = [tracking.line_values({"line": r.line, "over": r.over, "under": r.under}, np.asarray(r.pmf),
+                                 None if raw else r.kind)
             for r in g.itertuples(index=False)]
     g = pd.concat([g.drop(columns=["pmf"]).reset_index(drop=True), pd.DataFrame(vals)], axis=1)
     g["status"] = "graded"

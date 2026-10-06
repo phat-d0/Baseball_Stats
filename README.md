@@ -209,6 +209,15 @@ DraftKings price (`p_shadow`) so the Record tab can compare both against the mar
   the training run).
 - Starters without a known opposing lineup fall back to the game-level model.
 
+### Edges: model/DraftKings blend
+
+On historical prices DraftKings' own chance beats the model (`docs/backtest_2026.md`), so
+edges come from a blend that leans on DraftKings with a small tilt from the model,
+fitted on 2025 prices and tested on Aug-Sep 2026 (`docs/blend_2026.md`,
+`baseball_stats/blend.json`). Historical prices: the Fetch historical prices workflow
+(`scripts/fetch_history.py`, odds-history branch); `scripts/backtest.py` and
+`scripts/fit_blend.py` use them.
+
 ### Hitters: whole-game simulation (shadow)
 
 `pa_sim` simulates both lineups plate appearance by plate appearance through nine innings

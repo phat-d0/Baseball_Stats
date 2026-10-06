@@ -13,7 +13,7 @@ const state = {
   pitLine: store.get("pitLine", 5.5),
   recKind: store.get("recKind", "batter"),
   strategy: store.get("strategy", "edge12"), // paper portfolio shown
-  minEdge: store.get("minEdge", 0.05),
+  minEdge: store.get("minEdgeBlend", 0.01),
   calLine: null, // calibration chart: null = all lines pooled
   query: "",
   sheetLine: null, // line picked inside an open player sheet
@@ -48,7 +48,7 @@ function gameTime(iso) {
 }
 
 // ---------- DraftKings props ----------
-const EDGE_STEPS = [0.02, 0.05, 0.08, 0.12];
+const EDGE_STEPS = [0.01, 0.02, 0.03, 0.05]; // blended edges are small (docs/blend_2026.md)
 const american = (a) => (a == null ? "–" : a > 0 ? `+${a}` : `−${Math.abs(a)}`);
 const signedPct = (x, d = 0) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x * 100).toFixed(d)}%`);
 const CHECK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3.5 8.5l3 3 6-7"/></svg>';
@@ -61,7 +61,8 @@ function bestBet(player) {
       const ev = b[`ev_${side}`];
       if (ev == null || b[side] == null) continue;
       if (!best || ev > best.ev) {
-        best = { line: b.line, side, price: b[side], ev, p: side === "over" ? b.p_model : 1 - b.p_model, fetchedAt: b.fetched_at };
+        const po = b.p_blend ?? b.p_model; // edges come from the blended chance
+        best = { line: b.line, side, price: b[side], ev, p: side === "over" ? po : 1 - po, fetchedAt: b.fetched_at };
       }
     }
   }
@@ -125,7 +126,7 @@ function gameEdges(g) {
     return `
     <button class="row-btn has-edge" data-player="${r.kind}" data-game="${g.game_pk}" data-id="${r.id}">
       <span class="who"><b>${esc(r.name)}</b>${tags}
-        <span class="meta">${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${r.kind === "pitcher" ? "K" : "H+R+RBI"} · ${american(bb.price)} · model ${pct(bb.p)}</span></span>
+        <span class="meta">${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${r.kind === "pitcher" ? "K" : "H+R+RBI"} · ${american(bb.price)} · chance ${pct(bb.p)}</span></span>
       <span class="vals"><b class="pos-text">${signedPct(bb.ev)}</b><small>edge</small></span>
     </button>`;
   }).join("");
@@ -169,22 +170,22 @@ function valuePicks() {
     <button class="row-btn ${mins != null && mins > 90 ? "stale" : ""}" data-player="${p.kind}" data-game="${p.game.game_pk}" data-id="${p.id}">
       <span class="who"><b>${esc(p.name)}</b>
         <span class="meta">${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${p.kind === "pitcher" ? "K" : "H+R+RBI"} · ${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))}</span>${age}</span>
-      <span class="vals"><b class="pos-text">${signedPct(bb.ev)}</b><small>${american(bb.price)} · model ${pct(bb.p)}</small></span>
+      <span class="vals"><b class="pos-text">${signedPct(bb.ev)}</b><small>${american(bb.price)} · chance ${pct(bb.p)}</small></span>
     </button>`;
   }).join("");
   return `<h2 class="section-title">Value picks · DraftKings</h2>
     ${edgeControl()}
     ${picks.length ? `<div class="card list">${rows}</div>` : `<div class="card"><span class="muted">Nothing above a ${pct(state.minEdge)} edge right now.</span></div>`}
-    <p class="note">Edge = how much the model expects a $1 bet to return above your stake at DraftKings' price. Small edges are mostly noise; check Record → vs DraftKings before trusting them. Greyed = price over 90 minutes old. Hitters from projected lineups are left out until their lineup posts.</p>
+    <p class="note">Edge = how much a $1 bet is expected to return above your stake at DraftKings' price, using a blend of DraftKings' own chance and the model's (on past prices DraftKings is the more accurate of the two, so the blend leans on it). Expect few edges, mostly small; check Record → vs DraftKings before trusting them. Greyed = price over 90 minutes old. Hitters from projected lineups are left out until their lineup posts.</p>
     ${oddsNote()}`;
 }
 function bookTable(player) {
   if (!player.book?.length) return "";
   const cell = (ev) => `<td class="${ev != null && ev >= state.minEdge ? "edge-pos" : ""}">${signedPct(ev)}</td>`;
-  const rows = player.book.map((b) => `<tr><td>${b.line}</td><td>${american(b.over)}<br><span class="muted small">${american(b.under)}</span></td><td>${pct(b.p_model)}</td><td>${pct(b.p_book)}</td>${cell(b.ev_over)}${cell(b.ev_under)}</tr>`).join("");
+  const rows = player.book.map((b) => `<tr><td>${b.line}</td><td>${american(b.over)}<br><span class="muted small">${american(b.under)}</span></td><td>${pct(b.p_model)}</td><td>${pct(b.p_book)}</td><td><b>${pct(b.p_blend ?? b.p_model)}</b></td>${cell(b.ev_over)}${cell(b.ev_under)}</tr>`).join("");
   return `<h3 class="section-title">DraftKings</h3>
-    <table><thead><tr><th>Line</th><th>O / U</th><th>Model</th><th>DK</th><th>Edge O</th><th>Edge U</th></tr></thead><tbody>${rows}</tbody></table>
-    <p class="note">Model and DK = chance of the over; DK's is its price with the margin taken out.</p>`;
+    <table><thead><tr><th>Line</th><th>O / U</th><th>Model</th><th>DK</th><th>Blend</th><th>Edge O</th><th>Edge U</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="note">Chances of the over. DK = its price with the margin taken out; Blend = DraftKings' chance tilted by the model, which the edges use.</p>`;
 }
 
 // ---------- data access ----------
@@ -735,7 +736,7 @@ document.addEventListener("click", (ev) => {
   else if (t.dataset.batLine) { state.batLine = Number(t.dataset.batLine); store.set("batLine", state.batLine); render(); }
   else if (t.dataset.pitLine) { state.pitLine = Number(t.dataset.pitLine); store.set("pitLine", state.pitLine); render(); }
   else if (t.dataset.edge) {
-    state.minEdge = Number(t.dataset.edge); store.set("minEdge", state.minEdge); render();
+    state.minEdge = Number(t.dataset.edge); store.set("minEdgeBlend", state.minEdge); render();
     const g = state.sheetGame != null && slate()?.games.find((x) => x.game_pk === state.sheetGame);
     if (g && !$("#sheet").hidden) { $("#sheet-body").innerHTML = gameSheet(g); bindCharts($("#sheet-body")); }
   }

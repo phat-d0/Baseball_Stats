@@ -18,25 +18,29 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from . import model, odds, storage
+from . import blend, model, odds, storage
 
 EASTERN = ZoneInfo("America/New_York")
 SNAPSHOT_KEY = ["game_pk", "player_id", "kind", "line", "fetched_at"]
 
 
-def line_values(entry: dict, pmf: np.ndarray) -> dict:
-    """Model chance, DraftKings' no-vig chance and expected return per $1 on each side.
+def line_values(entry: dict, pmf: np.ndarray, kind: str | None = None) -> dict:
+    """Model chance, DraftKings' no-vig chance, the blend of the two (see ``blend``) and
+    the expected return per $1 on each side at the blended chance.
 
     The one place these are worked out, so the log stores exactly what the app shows.
     """
     p = float(model.p_over(pmf[None, :], entry["line"])[0])
+    p_book = odds.no_vig_over(entry.get("over"), entry.get("under"))
+    pb = blend.blended(p, p_book, kind)
     do = odds.american_to_decimal(entry.get("over"))
     du = odds.american_to_decimal(entry.get("under"))
     return {
         "p_model": p,
-        "p_book": odds.no_vig_over(entry.get("over"), entry.get("under")),
-        "ev_over": p * do - 1 if do else None,
-        "ev_under": (1 - p) * du - 1 if du else None,
+        "p_book": p_book,
+        "p_blend": pb,
+        "ev_over": pb * do - 1 if do else None,
+        "ev_under": (1 - pb) * du - 1 if du else None,
     }
 
 
@@ -91,7 +95,7 @@ def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict,
                     "p_shadow": float(model.p_over(sh_dist[j][None, :], e["line"])[0])
                     if sh_dist is not None else None,
                     "shadow_name": sh_model.name if sh_dist is not None else None,
-                    **line_values(e, d),
+                    **line_values(e, d, kind),
                     "lineup_confirmed": bool(r.get("lineup_confirmed", True))
                     if kind == "batter" else True,
                     "batting_order": r.get("batting_order") if kind == "batter" else None,
@@ -102,7 +106,7 @@ def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict,
         return df
     for c in ("over", "under", "batting_order"):
         df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
-    for c in ("p_book", "ev_over", "ev_under", "alpha", "p_shadow"):
+    for c in ("p_book", "p_blend", "ev_over", "ev_under", "alpha", "p_shadow"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
@@ -244,9 +248,16 @@ def update_grades(base=None) -> pd.DataFrame:
 # Picks and the Record tab's "vs DraftKings" numbers
 # --------------------------------------------------------------------------- #
 
-EDGE_STEPS = [0.02, 0.05, 0.08, 0.12]  # same as the app's minimum-edge control
-EDGE_BUCKETS = [(0.02, 0.05), (0.05, 0.08), (0.08, 0.12), (0.12, None)]
+EDGE_STEPS = [0.01, 0.02, 0.03, 0.05]  # same as the app's minimum-edge control
+EDGE_BUCKETS = [(0.01, 0.02), (0.02, 0.03), (0.03, 0.05), (0.05, None)]
 BOOTSTRAP = 2000
+
+
+def _p_bet(r) -> float:
+    """The chance a logged price's edge was worked out from (rows before the blend
+    carry only the model's)."""
+    pb = getattr(r, "p_blend", None)
+    return r.p_model if pb is None or pd.isna(pb) else pb
 
 
 def picks(grades: pd.DataFrame, threshold: float) -> pd.DataFrame:
@@ -283,7 +294,7 @@ def picks(grades: pd.DataFrame, threshold: float) -> pd.DataFrame:
                 "game_start": getattr(r, "game_start", None), "actual": getattr(r, "actual", None),
                 "game_date": pd.Timestamp(r.game_date), "fetched_at": r.fetched_at,
                 "line": r.line, "side": side, "price": int(price), "ev": float(ev),
-                "p": float(r.p_model if side == "over" else 1 - r.p_model),
+                "p": float(_p_bet(r) if side == "over" else 1 - _p_bet(r)),
                 "status": r.status, "won": won, "clv": clv,
                 "close_line": None if pd.isna(r.close_line) else float(r.close_line),
                 "lineup_confirmed": bool(r.lineup_confirmed) if not pd.isna(r.lineup_confirmed) else True,
@@ -399,17 +410,22 @@ def summary(grades: pd.DataFrame, *, days: int | None = None) -> dict:
 
 PAPER_STAKE = 10.0
 PAPER_EDGE = 0.12
-# Strategies paper traded side by side. The band strategy takes the first price at or
-# above its floor and keeps it only if that edge is below the ceiling, the same cut as
-# the Record tab's edge table.
+# Strategies paper traded side by side. ``source`` says which edges a strategy trades:
+# "blend" (DraftKings tilted by the model, from Oct 6, 2026) or "model" (the model's own
+# chance, used before then; those strategies keep their record but take no new trades).
+# A band strategy takes the first price at or above its floor and keeps it only if that
+# edge is below the ceiling.
 PAPER_STRATEGIES = [
-    {"key": "edge12", "label": "12%+ edge", "threshold": 0.12, "ceiling": None},
-    {"key": "edge8_12", "label": "8–12% edge", "threshold": 0.08, "ceiling": 0.12},
+    {"key": "blend1", "label": "Blended 1%+", "threshold": 0.01, "ceiling": None, "source": "blend"},
+    {"key": "edge12", "label": "Model 12%+ (retired)", "threshold": 0.12, "ceiling": None, "source": "model"},
+    {"key": "edge8_12", "label": "Model 8–12% (retired)", "threshold": 0.08, "ceiling": 0.12,
+     "source": "model"},
 ]
 
 
 def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
-                 threshold: float = PAPER_EDGE, ceiling: float | None = None) -> pd.DataFrame:
+                 threshold: float = PAPER_EDGE, ceiling: float | None = None,
+                 source: str | None = None) -> pd.DataFrame:
     """Paper bets: $``stake`` on every value pick at or above ``threshold`` edge
     (and, with ``ceiling``, below it at the moment it first cleared ``threshold``).
 
@@ -421,6 +437,9 @@ def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
     if grades is None or grades.empty:
         return pd.DataFrame()
     g = grades
+    if source is not None:
+        blended = g["p_blend"].notna() if "p_blend" in g else pd.Series(False, index=g.index)
+        g = g[blended if source == "blend" else ~blended]
     if "lineup_confirmed" in g:
         g = g[(g["kind"] == "pitcher") | g["lineup_confirmed"].fillna(True).astype(bool)]
     t = picks(g, threshold)
@@ -443,10 +462,11 @@ def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
 def paper_portfolio(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
                     threshold: float = PAPER_EDGE, ceiling: float | None = None,
                     names: dict | None = None, key: str | None = None,
-                    label: str | None = None) -> dict:
+                    label: str | None = None, source: str | None = None) -> dict:
     """One paper strategy in data.json: its trades, their totals and daily profit."""
-    t = paper_trades(grades, stake=stake, threshold=threshold, ceiling=ceiling)
-    base = {"stake": stake, "threshold": threshold, "ceiling": ceiling, "key": key, "label": label}
+    t = paper_trades(grades, stake=stake, threshold=threshold, ceiling=ceiling, source=source)
+    base = {"stake": stake, "threshold": threshold, "ceiling": ceiling, "key": key, "label": label,
+            "source": source}
     if names and not t.empty:  # probable pitchers are logged without a name
         t["player_name"] = t["player_name"].astype(object)  # all-missing names load as float
         missing = t["player_name"].isna() | (t["player_name"].astype(str).str.strip() == "")
@@ -482,4 +502,5 @@ def paper_portfolio(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
 def paper_strategies(grades: pd.DataFrame, names: dict | None = None) -> list[dict]:
     """``paper_strategies`` in data.json: every strategy in ``PAPER_STRATEGIES``."""
     return [paper_portfolio(grades, threshold=st["threshold"], ceiling=st["ceiling"], names=names,
-                            key=st["key"], label=st["label"]) for st in PAPER_STRATEGIES]
+                            key=st["key"], label=st["label"], source=st["source"])
+            for st in PAPER_STRATEGIES]

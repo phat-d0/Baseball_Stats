@@ -231,7 +231,7 @@ def test_market_summary_end_to_end(fake, dk, tmp_path):
     market = data["record"]["market"]
     assert market["first_snapshot"] == "2025-06-15"
     assert market["pitcher"]["n_lines"] == 1
-    assert set(market["pitcher"]["by_threshold"]) == {"0.02", "0.05", "0.08", "0.12"}
+    assert set(market["pitcher"]["by_threshold"]) == {"0.01", "0.02", "0.03", "0.05"}
 
 
 def test_no_key_market_empty(fake, tmp_path, monkeypatch):
@@ -276,20 +276,25 @@ def test_paper_band_strategy():
     t = tracking.paper_trades(_paper_grades(), threshold=0.08, ceiling=0.12)
     assert sorted(t["player_id"]) == [3]
     assert t.iloc[0]["profit"] == pytest.approx(12.0)
-    both = tracking.paper_strategies(_paper_grades())
-    assert [s["key"] for s in both] == ["edge12", "edge8_12"]
-    assert both[0]["summary"]["n"] == 4 and both[1]["summary"]["n"] == 1
-    assert both[1]["ceiling"] == 0.12 and both[1]["label"]
+    st = {s["key"]: s for s in tracking.paper_strategies(_paper_grades())}
+    assert list(st) == ["blend1", "edge12", "edge8_12"]
+    # These rows predate the blend (no p_blend): only the retired model strategies trade them.
+    assert st["blend1"]["summary"]["n"] == 0
+    assert st["edge12"]["summary"]["n"] == 4 and st["edge8_12"]["summary"]["n"] == 1
+    assert st["edge8_12"]["ceiling"] == 0.12 and st["edge8_12"]["label"]
+    blended = _paper_grades().assign(p_blend=0.6)
+    st = {s["key"]: s for s in tracking.paper_strategies(blended)}
+    assert st["blend1"]["summary"]["n"] == 5 and st["edge12"]["summary"]["n"] == 0
 
 
 def test_paper_portfolio_end_to_end(fake, dk, tmp_path):
     data = _publish(tmp_path, RUN1)
     assert data["paper_strategies"][0] == data["paper"]
     for st in data["paper_strategies"][1:]:
-        assert all(st["threshold"] <= t["ev"] < st["ceiling"] for t in st["trades"])
+        assert not st["trades"]  # retired: new prices carry blended edges
     paper = data["paper"]
-    assert paper["stake"] == 10 and paper["threshold"] == 0.12
-    assert all(t["ev"] >= 0.12 and t["result"] == "open" for t in paper["trades"])
+    assert paper["stake"] == 10 and paper["threshold"] == 0.01 and paper["source"] == "blend"
+    assert all(t["ev"] >= 0.01 and t["result"] == "open" for t in paper["trades"])
     _finish_game(k=7, hrr=1)
     paper = _publish(tmp_path, datetime(2025, 6, 16, 16, 0, tzinfo=UTC))["paper"]
     for t in paper["trades"]:
@@ -299,3 +304,18 @@ def test_paper_portfolio_end_to_end(fake, dk, tmp_path):
     if paper["trades"]:
         assert paper["summary"]["profit"] == pytest.approx(sum(t["profit"] for t in paper["trades"]))
         assert paper["curve"][-1]["cum"] == pytest.approx(paper["summary"]["profit"])
+
+
+def test_line_values_use_the_blend(monkeypatch):
+    from baseball_stats import blend
+    pmf = np.zeros(15)
+    pmf[7] = 1.0  # always 7: model says over 5.5 for sure
+    entry = {"line": 5.5, "over": 100, "under": -120}
+    monkeypatch.setattr(blend, "weights", lambda: {})
+    raw = tracking.line_values(entry, pmf, "pitcher")
+    assert raw["p_blend"] == raw["p_model"] and raw["ev_over"] == pytest.approx(raw["p_model"] * 2 - 1)
+    monkeypatch.setattr(blend, "weights", lambda: {"pitcher": {"model": 0.0, "book": 1.0, "intercept": 0.0}})
+    v = tracking.line_values(entry, pmf, "pitcher")
+    assert v["p_blend"] == pytest.approx(v["p_book"], abs=1e-6)  # all book: no edge left
+    assert v["ev_over"] < 0 and v["ev_under"] < 0
+    assert tracking.line_values(entry, pmf, "batter")["p_blend"] == v["p_model"]  # no weights for hitters

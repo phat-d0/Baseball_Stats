@@ -180,11 +180,12 @@ def find_slates(today: date, inputs: dict) -> list[tuple[date, dict]]:
     return out
 
 
-def book_lines(entries: list[dict] | None, pmf: np.ndarray) -> list[dict] | None:
-    """DraftKings lines for one player, with the model's chance and expected value per side."""
+def book_lines(entries: list[dict] | None, pmf: np.ndarray, kind: str) -> list[dict] | None:
+    """DraftKings lines for one player, with the model's and blended chances and the
+    expected value per side."""
     if not entries:
         return None
-    return [{**e, **tracking.line_values(e, pmf)} for e in entries]
+    return [{**e, **tracking.line_values(e, pmf, kind)} for e in entries]
 
 
 def _pitcher_json(row: pd.Series, mu: float, pmf: np.ndarray, names: dict) -> dict:
@@ -262,7 +263,7 @@ def slate_json(day: date, s: dict, models: dict[str, model.CountModel], names: d
         for i, ((_, row), m, d) in enumerate(zip(pit.iterrows(), mu, dist)):
             side = "home" if row["is_home"] else "away"
             pj = _pitcher_json(row, m, d, names)
-            pj["book"] = book_lines((props or {}).get((row["game_pk"], pj["id"], "pitcher")), d)
+            pj["book"] = book_lines((props or {}).get((row["game_pk"], pj["id"], "pitcher")), d, "pitcher")
             if exp_bf is not None and np.isfinite(exp_bf[i]):
                 pj["stats"]["exp_bf"] = float(exp_bf[i])
             by_game[row["game_pk"]]["pitchers"][side] = pj
@@ -272,7 +273,7 @@ def slate_json(day: date, s: dict, models: dict[str, model.CountModel], names: d
         for (_, row), m, d in zip(bat.iterrows(), mu, dist):
             side = "home" if row["is_home"] else "away"
             bj = _batter_json(row, m, d, names)
-            bj["book"] = book_lines((props or {}).get((row["game_pk"], bj["id"], "batter")), d)
+            bj["book"] = book_lines((props or {}).get((row["game_pk"], bj["id"], "batter")), d, "batter")
             p = parts.get((int(row["game_pk"]), bj["id"]))
             if p:  # expected hits, runs and RBIs from the game simulation
                 bj["stats"].update({"exp_h": p["H"], "exp_r": p["R"], "exp_rbi": p["RBI"]})
@@ -392,7 +393,7 @@ def publish(out: str | Path, *, history_start: date | None = None,
                    for d, s in slates],
         "odds_source": asdict(odds_status),
         "record": {**record, "market": market},
-        "paper": strategies[0],  # the 12%+ strategy, as before
+        "paper": strategies[0],  # the main strategy
         "paper_strategies": strategies,
     }
     data = _clean(data)

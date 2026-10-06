@@ -104,7 +104,9 @@ def test_publish_with_draftkings(fake, tmp_path, monkeypatch):
     b = sp["book"][0]
     p_over = sum(sp["pmf"][5:])
     assert b["p_model"] == pytest.approx(p_over, abs=1e-3)
-    assert b["ev_over"] == pytest.approx(p_over * (1 + 100 / 110) - 1, abs=1e-3)
+    # Edges use the blend of DraftKings' chance and the model's (baseball_stats/blend.py).
+    assert b["p_book"] < b["p_blend"] < b["p_model"] or b["p_model"] < b["p_blend"] < b["p_book"]
+    assert b["ev_over"] == pytest.approx(b["p_blend"] * (1 + 100 / 110) - 1, abs=1e-3)
     assert b["p_book"] == pytest.approx(0.5)
     hitter = next(x for x in g["lineups"]["home"] if x["id"] == 10101)
     assert hitter["book"][0]["over"] == 150
