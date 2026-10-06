@@ -556,43 +556,66 @@ function modelNote(kind) {
   return `<p class="note">Active ${kind === "pitcher" ? "strikeout" : "H+R+RBI"} model: ${esc(MODEL_NAMES[m.name] || m.name)}${shadow}.</p>`;
 }
 
+// The verdict that heads Record: are picks beating DraftKings? Deliberately cautious: it
+// only says "beating" when even the low end of the return range is above zero.
+function verdict(t, few) {
+  if (few) return { cls: "", head: "Too early to tell", sub: `${t.n || 0} of ${MIN_PICKS} picks graded. Results this small are mostly luck.` };
+  const clvUp = t.clv != null && t.clv > 0;
+  if (clvUp && t.roi_lo > 0) return { cls: "pos-text", head: "Beating DraftKings", sub: "Positive return across the whole 90% range, and prices moved our way by first pitch." };
+  if (clvUp || t.roi > 0) return { cls: "", head: "Mixed signs", sub: `${t.roi > 0 ? "Return is positive" : "Return is negative"}, ${clvUp ? "but prices moved our way by first pitch" : "and prices didn't move our way by first pitch"}. Not proof of an edge yet.` };
+  return { cls: "neg-text", head: "Not beating DraftKings", sub: "Negative return and no closing line value so far." };
+}
+
 function marketCard() {
   const m = state.data?.record?.market;
   const k = m?.[state.recKind];
-  const head = `<h2 class="section-title">vs DraftKings</h2>`;
+  const head = `<h2 class="section-title">Are we beating DraftKings?</h2>`;
   if (!k || !k.by_threshold) {
     return `${head}<div class="card"><span class="muted">No graded DraftKings picks yet. Every price the app downloads is logged and graded after the game${m?.first_snapshot ? `; logging since ${shortDate(m.first_snapshot)}` : ""}.</span></div>`;
   }
   const t = k.by_threshold[String(state.minEdge)] || { n: 0 };
   const few = (t.n || 0) < MIN_PICKS;
+  const v = verdict(t, few);
   const pts = (x) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(1)} pts`);
-  const tiles = `
-    <div class="tiles ${few ? "dim" : ""}">
-      <div class="tile"><div class="label">Picks graded</div><div class="value">${(t.n || 0).toLocaleString()}</div><div class="sub">${t.n_void || 0} void · ${t.n_pending || 0} pending</div></div>
-      <div class="tile"><div class="label">Return per $1</div><div class="value ${t.roi > 0 && !few ? "pos-text" : ""}">${signedPct(t.roi, 1)}</div><div class="sub">90% range ${signedPct(t.roi_lo, 0)} to ${signedPct(t.roi_hi, 0)}</div></div>
-      <div class="tile"><div class="label">Win rate</div><div class="value">${pct(t.win, 1)}</div><div class="sub">break-even ${pct(t.breakeven, 1)} · model said ${pct(t.expected, 1)}</div></div>
-      <div class="tile"><div class="label">Closing line value</div><div class="value">${pts(t.clv)}</div><div class="sub">${t.clv_pos == null ? "no closing prices yet" : `${pct(t.clv_pos)} beat the close`}</div></div>
-    </div>`;
-  const ll = k.logloss_model != null
-    ? `<p class="note">Model log loss <b class="${k.logloss_model < k.logloss_book ? "pos-text" : ""}">${k.logloss_model.toFixed(4)}</b> vs DraftKings ${k.logloss_book.toFixed(4)} on ${k.n_lines.toLocaleString()} closing lines. Lower is better; if the model isn't lower, it knows nothing the price doesn't.</p>`
+  // Log loss on closing lines: the blend's when published, else the model's own, labeled so.
+  const llOurs = k.logloss_blend ?? k.logloss_model;
+  const llWho = k.logloss_blend != null ? "Our chance" : "Model alone";
+  const llRow = llOurs != null && k.logloss_book != null
+    ? `<div class="kv"><span>Accuracy vs DraftKings<small>log loss on ${k.n_lines.toLocaleString()} closing lines, lower is better</small></span>
+        <span><b class="${!few && llOurs < k.logloss_book ? "pos-text" : ""}">${llOurs.toFixed(4)}</b><small>${llWho} · DK ${k.logloss_book.toFixed(4)}</small></span></div>`
     : "";
+  const card = `
+    <div class="card verdict">
+      <div class="verdict-head ${few ? "" : v.cls}">${v.head}</div>
+      <p class="verdict-sub">${v.sub}</p>
+      <div class="kv"><span>Closing line value<small>how far DK's chance moved toward our pick by first pitch</small></span>
+        <span><b class="${!few && t.clv > 0 ? "pos-text" : ""}">${pts(t.clv)}</b><small>${t.clv_pos == null ? "no closing prices yet" : `${pct(t.clv_pos)} beat the close`}</small></span></div>
+      <div class="kv"><span>Return per $1<small>flat $1 on every pick at or above ${pct(state.minEdge)}</small></span>
+        <span><b class="${!few && t.roi > 0 ? "pos-text" : ""}">${signedPct(t.roi, 1)}</b><small>90% range ${signedPct(t.roi_lo, 0)} to ${signedPct(t.roi_hi, 0)}</small></span></div>
+      ${llRow}
+    </div>`;
   const sh = k.shadow;
   const shadowLine = sh
-    ? `<p class="note">Shadow (${esc(MODEL_NAMES[sh.name] || sh.name)}): log loss ${sh.logloss_shadow.toFixed(4)} vs active ${sh.logloss_model.toFixed(4)} and DraftKings ${sh.logloss_book.toFixed(4)} on the same ${sh.n_lines.toLocaleString()} closing lines.</p>`
+    ? `<p class="note">Shadow model (${esc(MODEL_NAMES[sh.name] || sh.name)}): log loss ${sh.logloss_shadow.toFixed(4)} vs active ${sh.logloss_model.toFixed(4)} and DraftKings ${sh.logloss_book.toFixed(4)} on the same ${sh.n_lines.toLocaleString()} closing lines.</p>`
     : "";
   const edgeRows = (k.by_edge || []).map((b) => `<tr><td>${pct(b.lo)}${b.hi ? `–${pct(b.hi)}` : "+"}</td><td>${b.n || 0}</td><td>${pct(b.win)}</td><td>${signedPct(b.roi, 1)}</td><td>${b.clv == null ? "–" : pts(b.clv)}</td></tr>`).join("");
   const lineup = k.by_lineup
-    ? `<p class="note">Hitters at a 2%+ edge: confirmed lineups ${signedPct(k.by_lineup.confirmed?.roi, 1)} on ${k.by_lineup.confirmed?.n || 0}, projected ${signedPct(k.by_lineup.projected?.roi, 1)} on ${k.by_lineup.projected?.n || 0}.</p>`
+    ? `<p class="note">Hitters at a 1%+ edge: confirmed lineups ${signedPct(k.by_lineup.confirmed?.roi, 1)} on ${k.by_lineup.confirmed?.n || 0}, projected ${signedPct(k.by_lineup.projected?.roi, 1)} on ${k.by_lineup.projected?.n || 0}.</p>`
     : "";
   return `${head}
     ${edgeControl()}
-    ${tiles}
-    ${few ? `<p class="note">Too few picks to judge yet (${t.n || 0} of ${MIN_PICKS}). Until then these numbers are mostly luck.</p>` : ""}
-    ${ll}
-    ${shadowLine}
-    <div class="card"><table><thead><tr><th>Edge</th><th>Picks</th><th>Win</th><th>Return</th><th>CLV</th></tr></thead><tbody>${edgeRows}</tbody></table></div>
-    ${lineup}
-    <p class="note">A pick is the first DraftKings price at or above the edge, $1 flat, graded after the game. Closing line value: how far DraftKings' own chance moved toward the pick by first pitch, in percentage points; beating the close consistently is the surest sign of real value.</p>`;
+    ${card}
+    <details class="more">
+      <summary>Picks, win rate and edge bands</summary>
+      <div class="kv-list card">
+        <div class="kv"><span>Picks graded</span><span><b>${(t.n || 0).toLocaleString()}</b><small>${t.n_void || 0} void · ${t.n_pending || 0} pending</small></span></div>
+        <div class="kv"><span>Win rate</span><span><b>${pct(t.win, 1)}</b><small>break-even ${pct(t.breakeven, 1)} · we said ${pct(t.expected, 1)}</small></span></div>
+      </div>
+      <div class="card"><table><thead><tr><th>Edge</th><th>Picks</th><th>Win</th><th>Return</th><th>CLV</th></tr></thead><tbody>${edgeRows}</tbody></table></div>
+      ${lineup}
+      ${shadowLine}
+      <p class="note">A pick is the first DraftKings price at or above the edge, $1 flat, graded after the game. Closing line value: how far DraftKings' own chance moved toward the pick by first pitch, in percentage points; beating the close consistently is the surest sign of real value. Log loss scores every closing line, picked or not; if ours isn't lower than DraftKings', we know nothing the price doesn't.</p>
+    </details>`;
 }
 
 function viewRecord() {
@@ -610,20 +633,22 @@ function viewRecord() {
     ? `<div class="segmented">${[[null, "All lines"], ...Object.keys(byLine).map((l) => [l, `O ${l}`])]
         .map(([v, l]) => `<button data-cal-line="${v ?? ""}" class="${(v ?? null) === calKey ? "on" : ""}">${l}</button>`).join("")}</div>`
     : "";
+  const days = Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1;
   return `${toggle}
-    ${modelNote(state.recKind)}
     ${marketCard()}
-    <h2 class="section-title">Last ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days, not used in training</h2>
+    <h2 class="section-title">Model on its own · last ${days} days</h2>
+    ${modelNote(state.recKind)}
     <div class="tiles">
       <div class="tile"><div class="label">Over/under chances</div><div class="value">${llGain == null ? "–" : `${llGain >= 0 ? "+" : "−"}${Math.abs(llGain * 100).toFixed(1)}%`}</div><div class="sub">${llGain == null ? "" : llGain >= 0 ? "better than season average" : "worse than season average"}</div></div>
       <div class="tile"><div class="label">Average miss</div><div class="value">${fix(rec.mae_model, 2)}</div><div class="sub">${unit} per game · season avg ${fix(rec.mae_baseline, 2)}</div></div>
       <div class="tile"><div class="label">Daily top-10 over ${tp.line}</div><div class="value">${pct(tp.actual)}</div><div class="sub">hit · model said ${pct(tp.predicted)}</div></div>
       <div class="tile"><div class="label">${state.recKind === "batter" ? "Hitter" : "Starter"} games graded</div><div class="value">${rec.n.toLocaleString()}</div><div class="sub">${shortDate(rec.test_from)} – ${shortDate(rec.test_to)}</div></div>
     </div>
-    <h2 class="section-title">Are the chances honest?</h2>
+    <p class="note">Compared with the obvious guess, the player's own ${unit} per game this season, on games not used in training. This says the model learns something; only the section above says whether that's worth money against DraftKings.</p>
+    <h2 class="section-title">Are the model's chances honest?</h2>
     ${calSwitch}
     <div class="card">${calibrationChart(calKey ? byLine[calKey] : rec.calibration || [])}</div>
-    <p class="note">"Season average" is the player's own ${unit} per game this season, the obvious guess without a model. "Over/under chances" scores the chance of going over every line (log loss); it's what matters for betting, and it can improve even when the average miss barely moves. The model retrains every run on all finished games; this check holds out the most recent ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days.</p>`;
+    <p class="note">"Over/under chances" scores the chance of going over every line (log loss); it's what matters for betting, and it can improve even when the average miss barely moves. The model retrains every run on all finished games; this check holds out the most recent ${days} days.</p>`;
 }
 
 // ---------- paper portfolio ----------
