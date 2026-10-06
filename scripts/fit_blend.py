@@ -60,7 +60,7 @@ def apply(g: pd.DataFrame, w: dict) -> pd.DataFrame:
     return g
 
 
-def load(folder: str, cache: str | None = None) -> pd.DataFrame:
+def load(folder: str, cache: str | None = None, batter: str = "current") -> pd.DataFrame:
     """Graded lines with walk-forward model chances. The predictions take a while, so
     ``cache`` (a parquet path) keeps them for the next run on the same prices."""
     if cache and Path(cache).exists():
@@ -69,7 +69,7 @@ def load(folder: str, cache: str | None = None) -> pd.DataFrame:
         return g
     snaps = backtest.load_prices(Path(folder))
     months = sorted({s["day"][:7] for s in snaps})
-    pred, inputs = backtest.predictions(months, 10_000)
+    pred, inputs = backtest.predictions(months, 10_000, batter)
     names = inputs["players"].set_index("player_id")["full_name"]
     roster = pred[["game_pk", "player_id", "kind"]].assign(name=pred["player_id"].map(names)).dropna()
     g = backtest.grades(backtest.price_rows(snaps, inputs["games"], roster), pred)
@@ -126,18 +126,21 @@ def main(argv=None) -> int:
     ap.add_argument("--live", default=None, help="price log (prop_snapshots.parquet) to add to the fit")
     ap.add_argument("--weights", default=None, help="write the fitted weights here")
     ap.add_argument("--report", default=None)
+    ap.add_argument("--batter", default="current", help="hitter model (an evaluate.py variant)")
     ap.add_argument("--cache", default=None,
-                    help="folder to keep the graded lines in, by folder name (delete it after a model change)")
+                    help="folder to keep the graded lines in, by folder and hitter model (delete it after a model change)")
     args = ap.parse_args(argv)
 
-    cache = (lambda f: str(Path(args.cache) / f"{Path(f).name}.parquet")) if args.cache else (lambda f: None)
+    cache = ((lambda f: str(Path(args.cache) / f"{Path(f).name}-{args.batter}.parquet")) if args.cache
+             else (lambda f: None))
     if args.cache:
         Path(args.cache).mkdir(parents=True, exist_ok=True)
-    parts = [load(f, cache(f)) for f in args.fit]
+    parts = [load(f, cache(f), args.batter) for f in args.fit]
     if args.live:
         parts.append(load_live(args.live))
     g_fit = pd.concat([x for x in parts if not x.empty], ignore_index=True)
-    report: dict = {"fit_prices": args.fit, "live": args.live, "fit": {}, "by_month": {}, "test": {}}
+    report: dict = {"fit_prices": args.fit, "live": args.live, "batter_model": args.batter,
+                    "fit": {}, "by_month": {}, "test": {}}
     weights = {}
     for kind in ("batter", "pitcher"):
         k = g_fit[g_fit["kind"] == kind]
@@ -146,7 +149,7 @@ def main(argv=None) -> int:
         print(kind, json.dumps(weights[kind]), {m: round(w["model"], 2) for m, w in report["by_month"][kind].items()})
     report["fit"] = weights
     if args.test:
-        test(load(args.test, cache(args.test)), weights, report)
+        test(load(args.test, cache(args.test), args.batter), weights, report)
     else:
         report["walk_forward"] = {}
         for kind in weights:

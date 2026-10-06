@@ -314,6 +314,18 @@ def publish(out: str | Path, *, history_start: date | None = None,
         log.info("%s model: alpha=%.3f %s", kind, alpha,
                  {k: v for k, v in summary.items() if k.startswith(("mae", "n"))})
 
+    # Game-level alternatives to 'current' (model.MODELS), switched like the PA models below.
+    game_level = {}  # (kind, name) -> (model, Record summary)
+    for kind, lines in (("batter", BATTER_LINES), ("pitcher", PITCHER_LINES)):
+        for role in ("MODEL", "SHADOW"):
+            name = os.environ.get(f"BASEBALL_{role}_{kind.upper()}", "")
+            if name in model.MODELS and name != "current" and (kind, name) not in game_level:
+                cls = model.MODELS[name]
+                summary, alpha = model.evaluate(hist[kind], kind, lines=lines, cls=cls)
+                m = cls(kind).fit(hist[kind])
+                m.alpha = alpha
+                game_level[kind, name] = (m, summary)
+
     # build_slate may have fetched bios for new players, so read the table fresh.
     players = storage.read("players")
     names = dict(zip(players.get("player_id", []), players.get("full_name", [])))
@@ -332,13 +344,16 @@ def publish(out: str | Path, *, history_start: date | None = None,
         loaded = pa_models_for(kind, now, built_hist, hist[kind], models[kind], players,
                                {active_n, shadow_n}, active=active_n)
         current_m = models[kind]
-        if active_n in loaded:
+        if (kind, active_n) in game_level:
+            models[kind], record[kind] = game_level[kind, active_n]
+        elif active_n in loaded:
             models[kind] = loaded[active_n]
             rec = json.loads(sim_models._stamp_path(active_n).read_text()).get("record") or {}
             if rec:
                 record[kind] = rec
         if shadow_n and shadow_n != models[kind].name:
-            sh = current_m if shadow_n == "current" else loaded.get(shadow_n)
+            sh = (current_m if shadow_n == "current" else
+                  game_level.get((kind, shadow_n), (None,))[0] or loaded.get(shadow_n))
             if sh is not None:
                 shadows[kind] = sh
     shadow = shadows.get("pitcher")

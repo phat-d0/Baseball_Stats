@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 from scipy import stats
-from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 
 # Columns that identify a row or are known only after the game.
 NON_FEATURES = {
@@ -115,6 +115,56 @@ class CountModel:
         return mu, pmf(mu, self.alpha, MAX_COUNT[self.kind])
 
 
+DIST_PARAMS = dict(learning_rate=0.03, max_iter=600, max_leaf_nodes=7, min_samples_leaf=800,
+                   l2_regularization=10.0)
+
+
+@dataclass
+class DistModel(CountModel):
+    """Hitters: the whole H+R+RBI distribution from a gradient-boosted classifier on
+    the count (capped at MAX_COUNT), instead of a mean plus a negative binomial.
+
+    H+R+RBI isn't negative binomial (a home run alone is 3), and one spread for every
+    hitter put the 0.5 line 3.8 pp off. Passed the hitter gate 5 of 5 months
+    (docs/hitters_dist.md).
+    """
+
+    name: str = "dist"
+
+    def __post_init__(self):
+        if self.reg is None:
+            self.reg = HistGradientBoostingClassifier(
+                early_stopping=True, validation_fraction=0.1, n_iter_no_change=30,
+                random_state=0, **DIST_PARAMS)
+
+    def fit(self, df: pd.DataFrame) -> DistModel:
+        rows = training_rows(df, self.kind)
+        X = feature_frame(rows)
+        X = X.loc[:, X.notna().any()]
+        self.columns = list(X.columns)
+        cap = MAX_COUNT[self.kind]
+        self.reg.fit(X, np.minimum(rows[TARGETS[self.kind]].to_numpy(), cap).astype(int))
+        return self
+
+    def _pmf(self, df: pd.DataFrame) -> np.ndarray:
+        P = self.reg.predict_proba(feature_frame(df).reindex(columns=self.columns))
+        cap = MAX_COUNT[self.kind]
+        out = np.zeros((len(df), cap + 1))
+        for j, c in enumerate(self.reg.classes_):
+            out[:, min(int(c), cap)] += P[:, j]
+        return out
+
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        return self._pmf(df) @ np.arange(MAX_COUNT[self.kind] + 1)
+
+    def distribution(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        dist = self._pmf(df)
+        return dist @ np.arange(dist.shape[1]), dist
+
+
+MODELS = {"current": CountModel, "dist": DistModel}
+
+
 def baseline(df: pd.DataFrame, kind: str) -> np.ndarray:
     """What you'd guess without a model: the player's own season (else career) average."""
     if kind == "batter":
@@ -126,7 +176,7 @@ def baseline(df: pd.DataFrame, kind: str) -> np.ndarray:
 
 
 def evaluate(df: pd.DataFrame, kind: str, *, test_days: int = 30,
-             lines: list[float]) -> tuple[dict, float]:
+             lines: list[float], cls: type[CountModel] = CountModel) -> tuple[dict, float]:
     """Train on everything before the last ``test_days`` days, score those days.
 
     Returns the summary shown in the app's Record tab and the fitted alpha.
@@ -136,7 +186,7 @@ def evaluate(df: pd.DataFrame, kind: str, *, test_days: int = 30,
     train, test = rows[rows["game_date"] <= cutoff], rows[rows["game_date"] > cutoff]
     if len(train) < 500 or len(test) < 50:
         return {}, 0.1
-    m = CountModel(kind).fit(train)
+    m = cls(kind).fit(train)
     y = test[TARGETS[kind]].to_numpy()
     # The spread is fitted on games the model didn't train on: residuals on its own
     # training games are too small and would make the over/under chances overconfident.

@@ -95,12 +95,15 @@ def main(argv=None) -> int:
     ap.add_argument("--fit", required=True)
     ap.add_argument("--test", required=True)
     ap.add_argument("--cache", default=None, help="folder of graded lines from fit_blend.py --cache")
+    ap.add_argument("--batter", default="current", help="hitter model (an evaluate.py variant)")
     ap.add_argument("--variants", nargs="+", default=["base", "side", "line", "shrink", "side_shrink"])
     ap.add_argument("--report", default=None)
     args = ap.parse_args(argv)
 
-    cache = (lambda f: str(Path(args.cache) / f"{Path(f).name}.parquet")) if args.cache else (lambda f: None)
-    g_fit, g_test = fit_blend.load(args.fit, cache(args.fit)), fit_blend.load(args.test, cache(args.test))
+    cache = ((lambda f: str(Path(args.cache) / f"{Path(f).name}-{args.batter}.parquet")) if args.cache
+             else (lambda f: None))
+    g_fit = fit_blend.load(args.fit, cache(args.fit), args.batter)
+    g_test = fit_blend.load(args.test, cache(args.test), args.batter)
     report: dict = {}
     blended: dict[str, list] = {v: [] for v in args.variants}
     for kind in ("batter", "pitcher"):

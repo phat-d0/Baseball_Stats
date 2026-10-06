@@ -31,7 +31,7 @@ def graded_lines(months, n=400, seed=0):
 
 def test_refit_without_test_set_scores_walk_forward(monkeypatch, tmp_path):
     g = graded_lines(["2025-06", "2025-07", "2025-08", "2025-09", "2026-08"])
-    monkeypatch.setattr(fit_blend, "load", lambda folder, cache=None: g)
+    monkeypatch.setattr(fit_blend, "load", lambda folder, cache=None, batter="current": g)
     w, rep = tmp_path / "blend.json", tmp_path / "report.json"
     fit_blend.main(["--fit", "prices", "--weights", str(w), "--report", str(rep)])
     weights = json.loads(w.read_text())

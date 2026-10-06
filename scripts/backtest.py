@@ -77,13 +77,15 @@ def price_rows(snaps: list[dict], games: pd.DataFrame, roster: pd.DataFrame) -> 
 # Walk-forward predictions
 # --------------------------------------------------------------------------- #
 
-def predictions(months: list[str], sims: int) -> tuple[pd.DataFrame, dict]:
-    """Test rows of every month with ``pmf`` (list) for hitters and starters."""
+def predictions(months: list[str], sims: int, batter: str = "current") -> tuple[pd.DataFrame, dict]:
+    """Test rows of every month with ``pmf`` (list) for hitters and starters.
+    ``batter``: the hitter variant from scripts/evaluate.py (the live one by default)."""
     inputs = features.load_inputs()
     built = features.build_features(inputs)
     pa_all = storage.read("plate_appearances")
     out = []
-    for kind, fn in (("batter", evaluate.gbm_variant("batter")), ("pitcher", evaluate.pa_simple_variant())):
+    for kind, fn in (("batter", evaluate.variants_for("batter", [batter])[batter]),
+                     ("pitcher", evaluate.pa_simple_variant())):
         rows = model.training_rows(built["batter_hrr" if kind == "batter" else "pitcher_k"], kind)
         for month in months:
             start = pd.Timestamp(f"{month}-01")
@@ -236,6 +238,7 @@ def main(argv=None) -> int:
     ap.add_argument("--prices", default="odds_history")
     ap.add_argument("--sims", type=int, default=10_000)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--batter", default="current", help="hitter model (an evaluate.py variant)")
     args = ap.parse_args(argv)
 
     snaps = load_prices(Path(args.prices))
@@ -246,7 +249,7 @@ def main(argv=None) -> int:
     months = sorted({d[:7] for d in days})
     print(f"{len(snaps)} priced games, {days[0]} .. {days[-1]}", flush=True)
 
-    pred, inputs = predictions(months, args.sims)
+    pred, inputs = predictions(months, args.sims, args.batter)
     players = inputs["players"].set_index("player_id")["full_name"]
     roster = pred[["game_pk", "player_id", "kind"]].assign(name=pred["player_id"].map(players))
     roster = roster[roster["name"].notna()]

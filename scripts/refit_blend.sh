@@ -5,9 +5,12 @@
 # current code (walk-forward). Needs data/processed up to date (see CLAUDE.md).
 #
 #   scripts/refit_blend.sh [weights.json] [report.json]
+#
+# BATTER picks the hitter model and must match the live one (BASEBALL_MODEL_BATTER).
 set -euo pipefail
 weights=${1:-baseball_stats/blend.json}
 report=${2:-docs/edge_refit.json}
+batter=${BATTER:-dist}
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 git fetch -q origin odds-history odds-log
@@ -15,5 +18,5 @@ mkdir "$dir/prices"
 # The root holds the one-hour snapshots the blend is fitted on; other times sit in m<minutes>/.
 git archive origin/odds-history | tar -x -C "$dir/prices"
 git show origin/odds-log:prop_snapshots.parquet > "$dir/prop_snapshots.parquet"
-python scripts/fit_blend.py --fit "$dir/prices" --live "$dir/prop_snapshots.parquet" \
+python scripts/fit_blend.py --fit "$dir/prices" --live "$dir/prop_snapshots.parquet" --batter "$batter" \
   --weights "$weights" --report "$report"
