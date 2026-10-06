@@ -395,6 +395,7 @@ function playerSheet(kind, p) {
           ["Opp. lineup K% vs hand", s.lineup_k_pct == null ? null : pct(s.lineup_k_pct, 1)], ["Opp. team K%, season", s.opp_team_k_pct == null ? null : pct(s.opp_team_k_pct, 1)],
           ["Umpire K effect", factor(s.ump_k_factor)], ["Park K effect", factor(s.park_k_factor)],
           ["Days rest", s.days_rest == null ? null : String(s.days_rest)],
+          ["Expected batters faced", r1(s.exp_bf)],
         ])}
       </div>`;
   }
@@ -449,6 +450,17 @@ function viewPitchers() {
 
 // ---------- record ----------
 const MIN_PICKS = 200; // below this, results are mostly luck
+const MODEL_NAMES = {
+  current: "game-level model",
+  pa_simple: "plate-appearance model (each hitter's strikeout chance × batters faced)",
+  pa_seq: "batter-by-batter simulation",
+};
+function modelNote(kind) {
+  const m = state.data?.model?.[kind];
+  if (!m?.name) return "";
+  const shadow = m.shadow ? ` · ${esc(MODEL_NAMES[m.shadow] || m.shadow)} runs in shadow for comparison` : "";
+  return `<p class="note">Active ${kind === "pitcher" ? "strikeout" : "H+R+RBI"} model: ${esc(MODEL_NAMES[m.name] || m.name)}${shadow}.</p>`;
+}
 
 function marketCard() {
   const m = state.data?.record?.market;
@@ -470,6 +482,10 @@ function marketCard() {
   const ll = k.logloss_model != null
     ? `<p class="note">Model log loss <b class="${k.logloss_model < k.logloss_book ? "pos-text" : ""}">${k.logloss_model.toFixed(4)}</b> vs DraftKings ${k.logloss_book.toFixed(4)} on ${k.n_lines.toLocaleString()} closing lines. Lower is better; if the model isn't lower, it knows nothing the price doesn't.</p>`
     : "";
+  const sh = k.shadow;
+  const shadowLine = sh
+    ? `<p class="note">Shadow (${esc(MODEL_NAMES[sh.name] || sh.name)}): log loss ${sh.logloss_shadow.toFixed(4)} vs active ${sh.logloss_model.toFixed(4)} and DraftKings ${sh.logloss_book.toFixed(4)} on the same ${sh.n_lines.toLocaleString()} closing lines.</p>`
+    : "";
   const edgeRows = (k.by_edge || []).map((b) => `<tr><td>${pct(b.lo)}${b.hi ? `–${pct(b.hi)}` : "+"}</td><td>${b.n || 0}</td><td>${pct(b.win)}</td><td>${signedPct(b.roi, 1)}</td><td>${b.clv == null ? "–" : pts(b.clv)}</td></tr>`).join("");
   const lineup = k.by_lineup
     ? `<p class="note">Hitters at a 2%+ edge: confirmed lineups ${signedPct(k.by_lineup.confirmed?.roi, 1)} on ${k.by_lineup.confirmed?.n || 0}, projected ${signedPct(k.by_lineup.projected?.roi, 1)} on ${k.by_lineup.projected?.n || 0}.</p>`
@@ -479,6 +495,7 @@ function marketCard() {
     ${tiles}
     ${few ? `<p class="note">Too few picks to judge yet (${t.n || 0} of ${MIN_PICKS}). Until then these numbers are mostly luck.</p>` : ""}
     ${ll}
+    ${shadowLine}
     <div class="card"><table><thead><tr><th>Edge</th><th>Picks</th><th>Win</th><th>Return</th><th>CLV</th></tr></thead><tbody>${edgeRows}</tbody></table></div>
     ${lineup}
     <p class="note">A pick is the first DraftKings price at or above the edge, $1 flat, graded after the game. Closing line value: how far DraftKings' own chance moved toward the pick by first pitch, in percentage points; beating the close consistently is the surest sign of real value.</p>`;
@@ -500,6 +517,7 @@ function viewRecord() {
         .map(([v, l]) => `<button data-cal-line="${v ?? ""}" class="${(v ?? null) === calKey ? "on" : ""}">${l}</button>`).join("")}</div>`
     : "";
   return `${toggle}
+    ${modelNote(state.recKind)}
     ${marketCard()}
     <h2 class="section-title">Last ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days, not used in training</h2>
     <div class="tiles">

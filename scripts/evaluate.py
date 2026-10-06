@@ -33,7 +33,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from baseball_stats import features, model, pa_model, simulate, storage  # noqa: E402
+from baseball_stats import features, model, pa_model, sim_models, simulate, storage  # noqa: E402
 
 LINES = {"batter": [0.5, 1.5, 2.5], "pitcher": [3.5, 4.5, 5.5, 6.5, 7.5]}
 FOLDS = ["2025-06", "2025-08", "2026-05", "2026-07", "2026-09"]
@@ -168,70 +168,29 @@ def _pa_models(f: Fold, stay: bool = True):
     return _PA_CACHE[key]
 
 
-def _fallback(f: Fold):
-    """Starts with no known lineup fall back to the current model."""
-    return gbm_variant("pitcher")(f)
+def _sim_model(f: Fold, name: str):
+    """The live app's plate-appearance strikeout model, trained on this fold's history."""
+    outcome, sampler, stay, _ = _pa_models(f)
+    fb = model.CountModel("pitcher").fit(f.train)
+    fb.alpha = model.fit_alpha(f.calib["target_k"].to_numpy(), fb.predict(f.calib))
+    if name == "pa_simple":
+        bf = model.CountModel("pitcher").fit(f.train.assign(target_k=f.train["target_bf"]))
+        m = sim_models.PASimpleK(outcome=outcome, fallback=fb, players=f.players, bf_model=bf)
+    else:
+        m = sim_models.PASeqK(outcome=outcome, fallback=fb, players=f.players, stay=stay,
+                              sampler=sampler, n_sims=f.sims)
+    return m.for_slate(f.built, f.players)
 
 
 def pa_seq_variant():
     """Batter-by-batter simulation: outcome model + stay-or-go + pitch counts."""
-    def fn(f: Fold):
-        _, sampler, stay, probs = _pa_models(f)
-        pre = pa_model.starter_pregame(f.built).set_index(["game_pk", "pitcher"])
-        pre_cols = [c for c in stay.columns if c not in pa_model.STAY_INGAME]
-        ratio = pa_model.pitcher_ppb_ratio(f.test, sampler.league_ppb)
-        mu_fb, dist_fb = _fallback(f)
-        mu, dist = mu_fb.copy(), dist_fb.copy()
-        for i, r in enumerate(f.test.itertuples(index=False)):
-            key = (int(r.game_pk), int(r.player_id))
-            if key not in probs:
-                continue
-            row = pre.loc[key] if key in pre.index else pd.Series(dtype=float)
-            row = row.reindex(pre_cols) if len(row) else pd.Series(np.nan, index=pre_cols)
-            grid = simulate.stay_grid(stay, row)
-            sim = simulate.simulate_start(probs[key], grid, sampler, float(ratio.iloc[i]),
-                                          seed=simulate.seed_for(*key), n_sims=f.sims)
-            dist[i] = simulate.distribution(sim["k"], model.MAX_COUNT["pitcher"])
-            mu[i] = sim["k"].mean()
-        return mu, dist
-    return fn
+    return lambda f: _sim_model(f, "pa_seq").distribution(f.test)
 
 
 def pa_simple_variant():
     """Outcome model for each batter's strikeout chance; batters faced from a direct
     model of target_bf, independent of what happens in the game."""
-    def fn(f: Fold):
-        _, _, _, probs = _pa_models(f, stay=False)
-        bf_model = model.CountModel("pitcher")
-        bf_model.fit(f.train.assign(target_k=f.train["target_bf"]))
-        mu_bf = bf_model.predict(f.test)
-        mu_fb, dist_fb = _fallback(f)
-        mu, dist = mu_fb.copy(), dist_fb.copy()
-        K = model.MAX_COUNT["pitcher"]
-        b = np.arange(1, simulate.MAX_BF + 1)
-        kidx = simulate.K
-        for i, r in enumerate(f.test.itertuples(index=False)):
-            key = (int(r.game_pk), int(r.player_id))
-            if key not in probs:
-                continue
-            p_bf = model.pmf(np.array([mu_bf[i]]), 1e-4, simulate.MAX_BF + 1)[0][1:simulate.MAX_BF + 1]
-            p_bf = p_bf / p_bf.sum()
-            pk = np.array([probs[key][(j - 1) % 9, min(2, (j - 1) // 9), kidx] for j in b])
-            # Strikeouts after each batter (Poisson-binomial), mixed over batters faced.
-            state = np.zeros(K + 1); state[0] = 1.0
-            out = np.zeros(K + 1)
-            for j in range(len(b)):
-                nxt = state * (1 - pk[j])
-                nxt[1:] += state[:-1] * pk[j]
-                nxt[-1] += state[-1] * pk[j]
-                state = nxt
-                out += p_bf[j] * state
-            out = (1 - simulate.BLEND) * out / out.sum() + simulate.BLEND * model.pmf(
-                np.array([max((out * np.arange(K + 1)).sum(), 1e-3)]), 0.02, K)[0]
-            dist[i] = out / out.sum()
-            mu[i] = float((dist[i] * np.arange(K + 1)).sum())
-        return mu, dist
-    return fn
+    return lambda f: _sim_model(f, "pa_simple").distribution(f.test)
 
 
 def variants_for(kind: str, names: list[str] | None = None) -> dict:

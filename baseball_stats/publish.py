@@ -9,6 +9,7 @@ site needs no server and can be hosted on GitHub Pages.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import math
 import shutil
@@ -20,7 +21,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from . import collect, config, features, mlb_api, model, odds, pa_data, slate, storage, tracking
+from . import collect, config, features, mlb_api, model, odds, pa_data, sim_models, slate, storage, tracking
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +122,40 @@ def update_statcast(today: date, history_start: date | None) -> dict | None:
     return check
 
 
+MIN_PA_ROWS = 50_000  # plate appearances needed before the PA models are used
+
+
+def pitcher_pa_models(now: datetime, built_hist: dict, hist_pitcher: pd.DataFrame,
+                      current: model.CountModel, players: pd.DataFrame,
+                      names: set[str]) -> dict[str, sim_models._Base]:
+    """Load (or, once a day, train) the plate-appearance strikeout models in ``names``."""
+    names = {n for n in names if n in ("pa_simple", "pa_seq")}
+    if not names:
+        return {}
+    pa = storage.read("plate_appearances")
+    if len(pa) < MIN_PA_ROWS:
+        log.warning("only %d plate appearances; strikeout models stay on 'current'", len(pa))
+        return {}
+    latest = pd.to_datetime(pa["game_date"]).max().date().isoformat()
+    out = {}
+    for name in sorted(names):
+        try:
+            if sim_models.is_stale(name, now, latest):
+                t0 = datetime.now(UTC)
+                m = sim_models.train(name, pa, built_hist, model.training_rows(hist_pitcher, "pitcher"),
+                                     current, players)
+                rec = sim_models.holdout_record(name, pa, built_hist, hist_pitcher, None, players,
+                                                PITCHER_LINES)
+                sim_models.save(m, now, latest, rec)
+                log.info("trained %s on %d plate appearances in %.0fs", name, len(pa),
+                         (datetime.now(UTC) - t0).total_seconds())
+            m, _ = sim_models.load(name, current, players)
+            out[name] = m
+        except Exception as exc:  # never let a new model take the app down
+            log.warning("strikeout model %s unavailable (%s); using 'current'", name, exc)
+    return out
+
+
 def find_slates(today: date, inputs: dict) -> list[tuple[date, dict]]:
     """Feature rows for the next ``SLATES`` days with games; the first carries history."""
     out = []
@@ -211,10 +246,13 @@ def slate_json(day: date, s: dict, models: dict[str, model.CountModel], names: d
         }
     if not pit.empty:
         mu, dist = models["pitcher"].distribution(pit)
-        for (_, row), m, d in zip(pit.iterrows(), mu, dist):
+        exp_bf = getattr(models["pitcher"], "last_exp_bf", None)
+        for i, ((_, row), m, d) in enumerate(zip(pit.iterrows(), mu, dist)):
             side = "home" if row["is_home"] else "away"
             pj = _pitcher_json(row, m, d, names)
             pj["book"] = book_lines((props or {}).get((row["game_pk"], pj["id"], "pitcher")), d)
+            if exp_bf is not None and np.isfinite(exp_bf[i]):
+                pj["stats"]["exp_bf"] = float(exp_bf[i])
             by_game[row["game_pk"]]["pitchers"][side] = pj
     if not bat.empty:
         mu, dist = models["batter"].distribution(bat)
@@ -263,6 +301,30 @@ def publish(out: str | Path, *, history_start: date | None = None,
     players = storage.read("players")
     names = dict(zip(players.get("player_id", []), players.get("full_name", [])))
 
+    # Strikeout model switch and shadow (see sim_models and docs/gate_phase1_pitcher.md).
+    active_k = os.environ.get("BASEBALL_MODEL_PITCHER", "current")
+    shadow_k = os.environ.get("BASEBALL_SHADOW_PITCHER", "")
+    if slates:
+        h = slates[0][1]
+        built_hist = {"batter_hrr": h["history_batter_hrr"], "pitcher_k": h["history_pitcher_k"],
+                      "pitcher_rates": h["history_pitcher_rates"]}
+    else:
+        built_hist = built
+    pa_k = pitcher_pa_models(now, built_hist, hist["pitcher"], models["pitcher"], players,
+                             {active_k, shadow_k})
+    current_k = models["pitcher"]
+    if active_k in pa_k:
+        models["pitcher"] = pa_k[active_k]
+        rec = json.loads(sim_models._stamp_path(active_k).read_text()).get("record") or {}
+        if rec:
+            record["pitcher"] = rec
+    shadow = None  # logged beside the active model's chance, never shown in the app
+    if shadow_k and shadow_k != models["pitcher"].name:
+        shadow = current_k if shadow_k == "current" else pa_k.get(shadow_k)
+    for kind in record:
+        if isinstance(record[kind], dict) and record[kind]:
+            record[kind]["model_name"] = models[kind].name
+
     def label(d: date) -> str:
         if d == today:
             return "Today"
@@ -282,7 +344,7 @@ def publish(out: str | Path, *, history_start: date | None = None,
         events, odds_status = odds.fetch_props(s["games"], now=now)
         props = odds.props_by_player(events, players_by_game)
         log.info("odds: %s", odds_status)
-        added = tracking.log_snapshots(s, models, props, now)
+        added = tracking.log_snapshots(s, models, props, now, shadow=shadow)
         log.info("price log: %d new snapshot rows", len(added))
 
     # Grade the full log (including prices logged just now) and build the paper portfolio.
@@ -300,9 +362,12 @@ def publish(out: str | Path, *, history_start: date | None = None,
         "data_through": (pd.to_datetime(final["game_date"]).max().date().isoformat()
                          if not final.empty else None),
         "lines": {"batter": BATTER_LINES, "pitcher": PITCHER_LINES},
-        "model": {k: {"alpha": m.alpha, "trained_rows": int(len(model.training_rows(hist[k], k)))}
+        "model": {k: {"name": m.name, "alpha": m.alpha,
+                      "shadow": shadow.name if k == "pitcher" and shadow is not None else None,
+                      "trained_rows": int(len(model.training_rows(hist[k], k)))}
                   for k, m in models.items()},
-        "slates": [slate_json(d, s, models, names, label(d), props if d == today else None)
+        "slates": [slate_json(d, s, {k: m.for_slate(s, players) for k, m in models.items()},
+                              names, label(d), props if d == today else None)
                    for d, s in slates],
         "odds_source": asdict(odds_status),
         "record": {**record, "market": market},

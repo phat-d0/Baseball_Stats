@@ -191,6 +191,22 @@ over/under chances. Results on 2024–2026 data (lower is better):
 | First model | 0.641 | 0.518 |
 | + matchup scores, tuned | **0.634** | **0.516** |
 
+### Plate-appearance strikeout models
+
+Strikeouts in the app come from `pa_simple` (`baseball_stats/sim_models.py`): each opposing
+hitter's strikeout chance from a plate-appearance outcome model (trained on every Statcast
+plate appearance since 2024), times a model of how many batters the starter will face. It
+passed the walk-forward gate against the game-level model (`docs/gate_phase1_pitcher.md`).
+The batter-by-batter simulation `pa_seq` runs in shadow: its chance is logged beside every
+DraftKings price (`p_shadow`) so the Record tab can compare both against the market.
+
+- Switch with repository variables `BASEBALL_MODEL_PITCHER` (`current`, `pa_simple`,
+  `pa_seq`) and `BASEBALL_SHADOW_PITCHER` (or empty).
+- The plate-appearance models train once a day (first run after 10:00 UTC, or when missing
+  or built with another scikit-learn) and are saved under `data/processed/models/`; other
+  runs load them (~1 minute per publish; ~5 minutes on the daily training run).
+- Starters without a known opposing lineup fall back to the game-level model.
+
 ## Modelling notes
 
 - Split train/validation **by date** (e.g. train 2023–2024, validate 2025), never randomly.

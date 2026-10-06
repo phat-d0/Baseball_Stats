@@ -69,6 +69,11 @@ jobs:
           # ODDS_API_MONTHLY_CAP); 0 or unset = no cap. On the 20k plan the refresh rules,
           # not credits, are the limit: about 7k a month in season.
           ODDS_API_MONTHLY_CAP: ${{ vars.ODDS_API_MONTHLY_CAP || '0' }}
+          # Strikeout model in the app, and one logged beside it in shadow for the price
+          # log's market check (docs/gate_phase1_pitcher.md). Override with repository
+          # variables: current | pa_simple | pa_seq (shadow may be empty).
+          BASEBALL_MODEL_PITCHER: ${{ vars.BASEBALL_MODEL_PITCHER || 'pa_simple' }}
+          BASEBALL_SHADOW_PITCHER: ${{ vars.BASEBALL_SHADOW_PITCHER || 'pa_seq' }}
         run: |
           pip install -r requirements.txt
           python -m baseball_stats publish --out _site --statcast

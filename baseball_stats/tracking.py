@@ -47,7 +47,8 @@ def _ts(x) -> pd.Timestamp | None:
     return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
 
 
-def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict) -> pd.DataFrame:
+def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict,
+                  shadow=None) -> pd.DataFrame:
     """``prop_snapshots`` rows for every player on the slate with DraftKings lines."""
     games = slate["games"].set_index("game_pk")
     sha = os.environ.get("GITHUB_SHA", "local")
@@ -60,8 +61,12 @@ def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict)
         if not have:
             continue
         sub = table.iloc[have]
-        mu, dist = models[kind].distribution(sub)
-        for (_, r), m, d in zip(sub.iterrows(), mu, dist):
+        active = models[kind].for_slate(slate)
+        mu, dist = active.distribution(sub)
+        sh_dist = None
+        if shadow is not None and kind == "pitcher":
+            _, sh_dist = shadow.for_slate(slate).distribution(sub)
+        for j, ((_, r), m, d) in enumerate(zip(sub.iterrows(), mu, dist)):
             g = games.loc[r["game_pk"]]
             start = _ts(g.get("game_datetime"))
             for e in props[(r["game_pk"], r["player_id"], kind)]:
@@ -80,7 +85,11 @@ def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict)
                     "over": e.get("over"),
                     "under": e.get("under"),
                     "mu": float(m),
-                    "alpha": float(models[kind].alpha),
+                    "alpha": None if active.alpha is None else float(active.alpha),
+                    "model_name": active.name,
+                    "p_shadow": float(model.p_over(sh_dist[j][None, :], e["line"])[0])
+                    if sh_dist is not None else None,
+                    "shadow_name": shadow.name if sh_dist is not None else None,
                     **line_values(e, d),
                     "lineup_confirmed": bool(r.get("lineup_confirmed", True))
                     if kind == "batter" else True,
@@ -92,20 +101,20 @@ def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict)
         return df
     for c in ("over", "under", "batting_order"):
         df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
-    for c in ("p_book", "ev_over", "ev_under"):
+    for c in ("p_book", "ev_over", "ev_under", "alpha", "p_shadow"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
 
 def log_snapshots(slate: dict, models: dict[str, model.CountModel], props: dict,
-                  now: datetime | None = None, base=None) -> pd.DataFrame:
+                  now: datetime | None = None, base=None, shadow=None) -> pd.DataFrame:
     """Append new price snapshots to ``prop_snapshots``; returns the rows added.
 
     Only downloads not already stored are added: re-running a publish on the same
     cached prices adds nothing, and earlier rows are never changed. ``now`` is unused
     beyond the signature the spec names; ``fetched_at`` comes from the ledger.
     """
-    new = snapshot_rows(slate, models, props)
+    new = snapshot_rows(slate, models, props, shadow=shadow)
     if new.empty:
         return new
     old = storage.read("prop_snapshots", base)
@@ -354,6 +363,15 @@ def summary(grades: pd.DataFrame, *, days: int | None = None) -> dict:
             res.update({"logloss_model": _logloss(close["p_model"], close["over_won"]),
                         "logloss_book": _logloss(close["p_book"], close["over_won"]),
                         "n_lines": int(len(close))})
+            if "p_shadow" in close and close["p_shadow"].notna().any():
+                sh = close[close["p_shadow"].notna()]
+                res["shadow"] = {
+                    "name": str(sh["shadow_name"].dropna().iloc[-1]),
+                    "n_lines": int(len(sh)),
+                    "logloss_shadow": _logloss(sh["p_shadow"], sh["over_won"]),
+                    "logloss_model": _logloss(sh["p_model"], sh["over_won"]),
+                    "logloss_book": _logloss(sh["p_book"], sh["over_won"]),
+                }
         res["by_threshold"] = {}
         for t in EDGE_STEPS:
             p = picks(k, t)
@@ -417,6 +435,7 @@ def paper_portfolio(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
     t = paper_trades(grades, stake=stake, threshold=threshold)
     base = {"stake": stake, "threshold": threshold}
     if names and not t.empty:  # probable pitchers are logged without a name
+        t["player_name"] = t["player_name"].astype(object)  # all-missing names load as float
         missing = t["player_name"].isna() | (t["player_name"].astype(str).str.strip() == "")
         t.loc[missing, "player_name"] = t.loc[missing, "player_id"].map(names)
     if t.empty:

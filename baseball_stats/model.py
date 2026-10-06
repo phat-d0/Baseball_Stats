@@ -104,6 +104,12 @@ class CountModel:
         X = feature_frame(df).reindex(columns=self.columns)
         return self.reg.predict(X)
 
+    name: str = "current"
+
+    def for_slate(self, slate: dict, players: pd.DataFrame | None = None) -> CountModel:
+        """Game-level models need no slate context (see sim_models for ones that do)."""
+        return self
+
     def distribution(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         mu = self.predict(df)
         return mu, pmf(mu, self.alpha, MAX_COUNT[self.kind])
@@ -136,8 +142,15 @@ def evaluate(df: pd.DataFrame, kind: str, *, test_days: int = 30,
     # training games are too small and would make the over/under chances overconfident.
     m.alpha = fit_alpha(y, m.predict(test))
     mu, dist = m.distribution(test)
+    return summarize_holdout(test, kind, mu, dist, lines, alpha_for_baseline=m.alpha), m.alpha
+
+
+def summarize_holdout(test: pd.DataFrame, kind: str, mu: np.ndarray, dist: np.ndarray,
+                      lines: list[float], *, alpha_for_baseline: float) -> dict:
+    """The Record tab's numbers for any model's predictions on held-out rows."""
+    y = test[TARGETS[kind]].to_numpy()
     base = baseline(test, kind)
-    base_dist = pmf(base, m.alpha, MAX_COUNT[kind])
+    base_dist = pmf(base, alpha_for_baseline, MAX_COUNT[kind])
 
     def logloss(d):
         p = np.clip(np.concatenate([p_over(d, ln) for ln in lines]), 1e-6, 1 - 1e-6)
@@ -169,7 +182,7 @@ def evaluate(df: pd.DataFrame, kind: str, *, test_days: int = 30,
             for b in range(10) if (bl == b).sum() >= 20
         ]
 
-    summary = {
+    return {
         "test_from": test["game_date"].min().date().isoformat(),
         "test_to": test["game_date"].max().date().isoformat(),
         "n": int(len(test)),
@@ -186,4 +199,3 @@ def evaluate(df: pd.DataFrame, kind: str, *, test_days: int = 30,
         "top_picks": {"line": main, "n": int(len(top)),
                       "predicted": float(top["_p"].mean()), "actual": float(top["_hit"].mean())},
     }
-    return summary, m.alpha
