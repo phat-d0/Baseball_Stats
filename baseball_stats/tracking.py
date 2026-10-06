@@ -375,6 +375,13 @@ def summary(grades: pd.DataFrame, *, days: int | None = None) -> dict:
             res.update({"logloss_model": _logloss(close["p_model"], close["over_won"]),
                         "logloss_book": _logloss(close["p_book"], close["over_won"]),
                         "n_lines": int(len(close))})
+            if "p_blend" in close and close["p_blend"].notna().any():
+                # The chance edges use, against DraftKings on the same closing lines
+                # (rows logged before the blend have no p_blend).
+                bl = close[close["p_blend"].notna()]
+                res.update({"logloss_blend": _logloss(bl["p_blend"], bl["over_won"]),
+                            "logloss_book_blend": _logloss(bl["p_book"], bl["over_won"]),
+                            "n_lines_blend": int(len(bl))})
             if "p_shadow" in close and close["p_shadow"].notna().any():
                 sh = close[close["p_shadow"].notna()]
                 res["shadow"] = {
@@ -384,13 +391,17 @@ def summary(grades: pd.DataFrame, *, days: int | None = None) -> dict:
                     "logloss_model": _logloss(sh["p_model"], sh["over_won"]),
                     "logloss_book": _logloss(sh["p_book"], sh["over_won"]),
                 }
+        # Picks are graded from the blend era only: earlier edges came from the model's
+        # own chance, a retired approach, and would blur whether the live one works.
+        bets = k[k["p_blend"].notna()] if "p_blend" in k else k.iloc[:0]
+        res["picks_since"] = (bets["game_date"].min().date().isoformat() if not bets.empty else None)
         res["by_threshold"] = {}
         for t in EDGE_STEPS:
-            p = picks(k, t)
+            p = picks(bets, t)
             m = pick_metrics(p)
             m["last30"] = pick_metrics(p[p["game_date"] > recent_from]) if not p.empty else {"n": 0}
             res["by_threshold"][f"{t:g}"] = m
-        base = picks(k, EDGE_STEPS[0])
+        base = picks(bets, EDGE_STEPS[0])
         res["by_edge"] = []
         for lo, hi in EDGE_BUCKETS:
             sel = base[(base["ev"] >= lo) & ((base["ev"] < hi) if hi else True)] if not base.empty else base

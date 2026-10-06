@@ -146,3 +146,15 @@ def test_publish_with_dist_hitters(fake, tmp_path, monkeypatch):
     row = log[log["kind"] == "batter"].iloc[0]
     assert row["model_name"] == "dist" and row["shadow_name"] == "current"
     assert 0 < row["p_shadow"] < 1
+
+
+def test_postseasons_backfilled_once(tmp_path, monkeypatch):
+    from datetime import date
+    from baseball_stats import collect, config
+    monkeypatch.setattr(config, "PROCESSED_DIR", tmp_path)
+    calls = []
+    monkeypatch.setattr(collect, "collect_games", lambda s, e, **kw: calls.append((s, e, kw)))
+    publish.backfill_postseasons(date(2026, 10, 6), date(2024, 3, 20))
+    assert [(s.year, kw["game_type"]) for s, _, kw in calls] == [(2024, "F,D,L,W"), (2025, "F,D,L,W")]
+    publish.backfill_postseasons(date(2026, 10, 7), date(2024, 3, 20))
+    assert len(calls) == 2  # remembered

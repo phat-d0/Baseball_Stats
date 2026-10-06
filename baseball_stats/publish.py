@@ -73,6 +73,33 @@ def update_data(today: date, history_start: date | None) -> None:
     end = today - timedelta(days=1)
     if start <= end:
         collect.collect_games(start, end)
+    backfill_postseasons(today, history_start)
+
+
+POSTSEASON_TYPES = "F,D,L,W"
+
+
+def backfill_postseasons(today: date, history_start: date | None) -> None:
+    """Collect past seasons' postseason games once.
+
+    The first backfill fetched regular-season games only, and later runs only fetch
+    recent days, so the 2024 and 2025 postseasons (about 90 games of training data)
+    were never stored. Seasons done are remembered in ``postseason_backfill.json``.
+    """
+    start = history_start or date(today.year - 2, 3, 1)
+    path = config.PROCESSED_DIR / "postseason_backfill.json"
+    done = set(json.loads(path.read_text())) if path.exists() else set()
+    for year in range(start.year, today.year):
+        if year in done:
+            continue
+        try:
+            collect.collect_games(date(year, 9, 25), date(year, 11, 10), game_type=POSTSEASON_TYPES)
+        except Exception as exc:  # retried next run
+            log.warning("postseason %d backfill failed (%s)", year, exc)
+            continue
+        done.add(year)
+        path.write_text(json.dumps(sorted(done)))
+        log.info("backfilled the %d postseason", year)
 
 
 def statcast_days_missing(today: date, history_start: date | None) -> list[date]:

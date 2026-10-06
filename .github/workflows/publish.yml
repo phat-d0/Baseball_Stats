@@ -11,6 +11,9 @@ on:
     - cron: "27,47 15-23,0-2 * * *"
   workflow_dispatch: # "Run workflow" button in the Actions tab
   push:
+    # Only the deploy branch: pushes to team branches would otherwise queue in the
+    # "pages" group below and cancel a pending deploy.
+    branches: [claude/stoic-davinci-v4p6k9]
     paths: ["baseball_stats/**", "web/**", "requirements.txt", ".github/workflows/publish.yml"]
 
 permissions:
