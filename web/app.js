@@ -43,6 +43,9 @@ function fairOdds(p) {
   return a > 0 ? `+${a}` : `−${Math.abs(a)}`;
 }
 
+// Timestamps from pandas look like "2026-10-06 17:41:54+00:00"; Safari won't parse the space.
+const parseTs = (x) => (x == null ? NaN : Date.parse(String(x).replace(" ", "T")));
+
 function gameTime(iso) {
   if (!iso) return "TBD";
   const d = new Date(iso);
@@ -187,7 +190,7 @@ function valuePicks() {
     .map((p) => ({ p, bb: bestBet(p) })).filter((x) => x.bb && x.bb.ev >= state.minEdge)
     .sort((a, b) => b.bb.ev - a.bb.ev).slice(0, 12);
   const rows = picks.map(({ p, bb }) => {
-    const mins = bb.fetchedAt ? Math.round((Date.now() - Date.parse(bb.fetchedAt)) / 60000) : null;
+    const mins = bb.fetchedAt ? Math.round((Date.now() - parseTs(bb.fetchedAt)) / 60000) : null;
     const age = mins == null ? "" : ` · price ${mins < 60 ? `${mins} min` : `${(mins / 60).toFixed(1)} h`} old`;
     const where = ` · ${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))}${age}`;
     return edgeRow(p, bb, { where, stale: mins != null && mins > 90 });
@@ -655,28 +658,34 @@ function viewRecord() {
 const decimalOdds = (a) => (a > 0 ? 1 + a / 100 : 1 + 100 / Math.abs(a));
 const money = (x, d = 2) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}$${Math.abs(x).toFixed(d)}`);
 
+// Cumulative profit by day, starting from $0 the day before the first settled day, so a
+// single settled day still draws a line. The $0 line is labeled; the last point carries
+// the running total.
 function profitChart(curve) {
-  if (!curve || curve.length < 2) return "";
-  const W = 320, H = 170, L = 40, R = 8, T = 10, B = 22;
-  const ys = curve.map((c) => c.cum);
+  if (!curve?.length) return "";
+  const pts = [{ date: null, cum: 0 }, ...curve];
+  const W = 320, H = 170, L = 44, R = 50, T = 12, B = 22;
+  const ys = pts.map((c) => c.cum);
   const lo = Math.min(0, ...ys), hi = Math.max(0, ...ys);
   const span = hi - lo || 1;
-  const sx = (i) => L + (i / (curve.length - 1)) * (W - L - R);
+  const sx = (i) => L + (i / (pts.length - 1)) * (W - L - R);
   const sy = (v) => T + (1 - (v - lo) / span) * (H - T - B);
-  const ticks = [lo, (lo + hi) / 2, hi];
+  const ticks = [lo, hi].filter((v) => Math.abs(v) > span * 0.12);
   const grid = ticks.map((v) => `<line x1="${L}" x2="${W - R}" y1="${sy(v)}" y2="${sy(v)}"/><text x="${L - 4}" y="${sy(v) + 3}" text-anchor="end">${money(v, 0)}</text>`).join("");
-  const path = curve.map((c, i) => `${i ? "L" : "M"}${sx(i)},${sy(c.cum)}`).join(" ");
-  const hits = curve.map((c, i) => `<circle class="hit" cx="${sx(i)}" cy="${sy(c.cum)}" r="12" fill="transparent" data-tip="${esc(`${shortDate(c.date)}: ${money(c.profit)} · total ${money(c.cum)}`)}" data-x="${(sx(i) / W) * 100}"/>`).join("");
-  const last = curve.length - 1;
+  const path = pts.map((c, i) => `${i ? "L" : "M"}${sx(i)},${sy(c.cum)}`).join(" ");
+  const hits = curve.map((c, i) => `<circle class="hit" cx="${sx(i + 1)}" cy="${sy(c.cum)}" r="12" fill="transparent" data-tip="${esc(`${shortDate(c.date)}: ${money(c.profit)} · total ${money(c.cum)}`)}" data-x="${(sx(i + 1) / W) * 100}"/>`).join("");
+  const last = pts.length - 1, end = pts[last].cum;
   return `
-    <div class="chart">
-      <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cumulative paper profit by day">
+    <div class="chart profit">
+      <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cumulative paper profit by day: ${money(end)} so far">
         <g class="grid">${grid}</g>
         <line class="zero" x1="${L}" x2="${W - R}" y1="${sy(0)}" y2="${sy(0)}"/>
-        <path class="line" d="${path}"/>
-        <circle class="dot" cx="${sx(last)}" cy="${sy(curve[last].cum)}" r="4"/>
-        <text class="xlab" x="${L}" y="${H - 6}">${shortDate(curve[0].date)}</text>
-        <text class="xlab" x="${W - R}" y="${H - 6}" text-anchor="end">${shortDate(curve[last].date)}</text>
+        <text class="xlab" x="${L - 4}" y="${sy(0) + 3}" text-anchor="end">$0</text>
+        <path class="line ${end < 0 ? "neg" : ""}" d="${path}"/>
+        <circle class="dot ${end < 0 ? "neg" : ""}" cx="${sx(last)}" cy="${sy(end)}" r="4"/>
+        <text class="end ${end > 0 ? "pos" : end < 0 ? "neg" : ""}" x="${sx(last) + 8}" y="${sy(end) + 4}">${money(end, 0)}</text>
+        <text class="xlab" x="${L}" y="${H - 6}">start</text>
+        <text class="xlab" x="${sx(last)}" y="${H - 6}" text-anchor="end">${shortDate(curve[curve.length - 1].date)}</text>
         ${hits}
       </svg>
       <div class="tooltip" hidden></div>
@@ -684,57 +693,80 @@ function profitChart(curve) {
 }
 
 function tradeRow(t) {
-  const what = `${t.side === "over" ? "Over" : "Under"} ${t.line} ${t.kind === "pitcher" ? "K" : "H+R+RBI"}`;
-  const placed = new Date(t.fetched_at);
+  const what = `${sideName(t.side)} ${t.line} ${unitName(t.kind)}`;
+  const placed = new Date(parseTs(t.fetched_at));
   const when = `${placed.toLocaleDateString([], { month: "short", day: "numeric" })} ${placed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+  const starts = parseTs(t.game_start);
   const right = t.result === "open"
     ? `<b>$${t.stake.toFixed(0)}</b><small>to win $${(t.stake * (decimalOdds(t.price) - 1)).toFixed(2)}</small>`
     : `<b class="${t.result === "won" ? "pos-text" : t.result === "lost" ? "neg-text" : ""}">${t.result === "void" ? "void" : money(t.profit)}</b><small>${t.result === "void" ? "refunded" : t.result}${t.actual != null ? ` · actual ${t.actual}` : ""}</small>`;
+  const timing = t.result === "open" && !Number.isNaN(starts) ? `First pitch ${gameTime(new Date(starts).toISOString())}` : `Placed ${when}`;
   return `
     <div class="row-btn">
       <span class="who"><b>${esc(t.player_name || "")}</b>
         <span class="meta">${what} · ${american(t.price)} · edge ${edgeText(t.ev)}</span>
-        <span class="meta">Placed ${when}${t.clv != null ? ` · CLV ${t.clv >= 0 ? "+" : "−"}${Math.abs(t.clv * 100).toFixed(1)} pts` : ""}</span></span>
+        <span class="meta">${timing}${t.clv != null ? ` · CLV ${t.clv >= 0 ? "+" : "−"}${Math.abs(t.clv * 100).toFixed(1)} pts` : ""}</span></span>
       <span class="vals">${right}</span>
     </div>`;
 }
 
 const edgeRange = (pp) => (pp?.ceiling ? `${pct(pp.threshold)}–${pct(pp.ceiling)}` : `${pct(pp?.threshold ?? 0.12)}+`);
+const shortLabel = (x) => String(x.label || x.key).replace(/\s*\(retired\)\s*$/i, "");
+const settledN = (s) => (s?.won || 0) + (s?.lost || 0);
+
+// One row per strategy, live first: name and status on the left, settled profit and
+// record on the right. Tapping a row shows that strategy below.
+function strategyList(all, pp) {
+  const rows = [...all].sort((a, b) => (b.source === "blend") - (a.source === "blend")).map((x) => {
+    const s = x.summary || {};
+    const live = x.source !== "model";
+    const status = live
+      ? `Live${s.first_trade ? ` since ${shortDate(String(s.first_trade).slice(0, 10))}` : ""}`
+      : "Retired · keeps its record";
+    const n = settledN(s);
+    const right = n
+      ? `<b class="${s.profit > 0 ? "pos-text" : s.profit < 0 ? "neg-text" : ""}">${money(s.profit)}</b><small>${s.won}–${s.lost} · ${signedPct(s.roi, 1)}</small>`
+      : `<b class="muted">–</b><small>${s.open ? `${s.open} open` : "no trades"}</small>`;
+    return `
+      <button class="row-btn strat${x === pp ? " on" : ""}${live ? "" : " retired"}" data-strategy="${esc(x.key)}" aria-pressed="${x === pp}">
+        <span class="who"><b>${esc(shortLabel(x))}</b><span class="meta">${status} · ${edgeRange(x)} edge</span></span>
+        <span class="vals">${right}</span>
+      </button>`;
+  }).join("");
+  return `<div class="card list">${rows}</div>`;
+}
 
 function viewPortfolio() {
   const all = strategies();
   const pp = all.find((x) => x.key === state.strategy) || all.find((x) => x.source === "blend") || all[0];
-  const toggle = all.length > 1
-    ? `<div class="segmented">${all.map((x) => `<button data-strategy="${esc(x.key)}" class="${x === pp ? "on" : ""}">${esc(x.label)}</button>`).join("")}</div>`
-    : "";
-  const compare = all.length > 1
-    ? `<div class="card"><table><thead><tr><th>Strategy</th><th>Trades</th><th>Record</th><th>Profit</th><th>Return</th></tr></thead><tbody>${all.map((x) => {
-        const s = x.summary || {};
-        return `<tr><td>${esc(x.label)}</td><td>${s.n || 0}</td><td>${s.n ? `${s.won}–${s.lost}` : "–"}</td><td class="${s.profit > 0 ? "pos-text" : s.profit < 0 ? "neg-text" : ""}">${s.n ? money(s.profit) : "–"}</td><td>${s.n ? signedPct(s.roi, 1) : "–"}</td></tr>`;
-      }).join("")}</tbody></table></div>`
-    : "";
-  const band = pp?.ceiling ? `, as long as that edge is below ${pct(pp.ceiling)}` : "";
   const basis = pp?.source === "model" ? "the model's own chance (retired Oct 6, 2026; it keeps its record but takes no new trades)" : "our blended chance";
+  const band = pp?.ceiling ? `, as long as that edge is below ${pct(pp.ceiling)}` : "";
   const rules = `<p class="note">Paper trading: $${pp?.stake ?? 10} on every DraftKings price whose edge, using ${basis}, is at least ${pct(pp?.threshold ?? 0.12)}, at the first price that clears it${band} (one trade per player and prop per game). Hitters from projected lineups are skipped. Trades are recorded automatically every run and settled from the box score; void = refunded.${all.length > 1 ? " The strategies run side by side on the same prices." : ""}</p>`;
-  const head = `<h2 class="section-title">Paper Portfolio</h2>${toggle}${compare}`;
+  const head = `<h2 class="section-title">Paper strategies</h2>${all.length > 1 ? strategyList(all, pp) : ""}`;
   if (!pp || !pp.summary?.n) {
     return `${head}<div class="empty">No paper trades yet.<br><span class="muted">One is recorded the first time a DraftKings price shows an edge of ${edgeRange(pp)}.</span></div>${rules}`;
   }
   const s = pp.summary;
+  const n = settledN(s);
   const open = pp.trades.filter((t) => t.result === "open");
   const settled = pp.trades.filter((t) => t.result !== "open");
-  return `
-    ${head}
+  const settledProfit = settled.reduce((a, t) => a + (t.profit || 0), 0);
+  const tiles = `
     <div class="tiles">
-      <div class="tile"><div class="label">Profit</div><div class="value ${s.profit > 0 ? "pos-text" : s.profit < 0 ? "neg-text" : ""}">${money(s.profit)}</div><div class="sub">on $${s.staked.toFixed(0)} settled</div></div>
-      <div class="tile"><div class="label">Return</div><div class="value">${signedPct(s.roi, 1)}</div><div class="sub">avg edge ${pct(s.avg_edge, 0)} at placement</div></div>
+      <div class="tile"><div class="label">Profit, settled</div><div class="value ${n && s.profit > 0 ? "pos-text" : n && s.profit < 0 ? "neg-text" : ""}">${n ? money(s.profit) : "–"}</div><div class="sub">${n ? `on $${s.staked.toFixed(0)} staked · ${signedPct(s.roi, 1)}` : "nothing settled yet"}</div></div>
       <div class="tile"><div class="label">Record</div><div class="value">${s.won}–${s.lost}</div><div class="sub">${s.void} void${s.clv != null ? ` · CLV ${s.clv >= 0 ? "+" : "−"}${Math.abs(s.clv).toFixed(1)} pts` : ""}</div></div>
       <div class="tile"><div class="label">Open</div><div class="value">${s.open}</div><div class="sub">$${s.at_risk.toFixed(0)} at risk</div></div>
-    </div>
-    ${pp.curve?.length > 1 ? `<h2 class="section-title">Profit over time</h2><div class="card">${profitChart(pp.curve)}</div>` : ""}
-    ${open.length ? `<h2 class="section-title">Open · ${open.length}</h2><div class="card list">${open.map(tradeRow).join("")}</div>` : ""}
-    ${settled.length ? `<h2 class="section-title">Settled · ${settled.length}</h2><div class="card list">${settled.slice(0, 100).map(tradeRow).join("")}</div>` : ""}
-    ${s.won + s.lost < 200 ? `<p class="note">Only ${s.won + s.lost} settled so far; until a few hundred, results are mostly luck.</p>` : ""}
+      <div class="tile"><div class="label">Avg edge</div><div class="value">${edgeText(s.avg_edge)}</div><div class="sub">when placed</div></div>
+    </div>`;
+  return `
+    ${head}
+    <h2 class="section-title">${esc(shortLabel(pp))}</h2>
+    ${tiles}
+    ${n < 200 ? `<p class="note">${n ? `Only ${n} settled so far` : "Nothing settled yet"}; until a few hundred, results are mostly luck.</p>` : ""}
+    ${pp.curve?.length ? `<h2 class="section-title">Profit over time</h2><div class="card">${profitChart(pp.curve)}</div>` : ""}
+    <h2 class="section-title">Open · ${open.length}${open.length ? ` · $${s.at_risk.toFixed(0)} at risk` : ""}</h2>
+    ${open.length ? `<div class="card list">${open.map(tradeRow).join("")}</div>` : `<div class="card"><span class="muted">No open trades.</span></div>`}
+    ${settled.length ? `<h2 class="section-title">Settled · ${settled.length} · <span class="${settledProfit > 0 ? "pos-text" : settledProfit < 0 ? "neg-text" : ""}">${money(settledProfit)}</span></h2><div class="card list">${settled.slice(0, 100).map(tradeRow).join("")}</div>` : ""}
     ${rules}`;
 }
 

@@ -446,3 +446,21 @@ details.more > summary {
 details.more > summary::-webkit-details-marker { display: none; }
 details.more > summary::after { content: "Show"; float: right; color: var(--text-muted); font-weight: 400; }
 details.more[open] > summary::after { content: "Hide"; }
+
+/* Portfolio: strategy list (tap to show one), profit chart */
+.list .row-btn.strat.on {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+  margin: 0 -14px;
+  width: calc(100% + 28px);
+  padding-left: 14px;
+  padding-right: 14px;
+  box-shadow: inset 4px 0 0 var(--accent);
+  border-top-color: transparent;
+}
+.list .row-btn.strat.on + .row-btn { border-top-color: transparent; }
+.row-btn.strat.retired:not(.on) .who b { color: var(--text-secondary); font-weight: 500; }
+.chart .line.neg { stroke: var(--neg); }
+.chart .dot.neg { fill: var(--neg); }
+.chart .end { font-size: 12px; font-weight: 600; fill: var(--text-primary); }
+.chart .end.pos { fill: var(--good-text); }
+.chart .end.neg { fill: var(--neg); }
