@@ -12,7 +12,7 @@ const state = {
   batLine: store.get("batLine", 1.5),
   pitLine: store.get("pitLine", 5.5),
   recKind: store.get("recKind", "batter"),
-  strategy: store.get("strategy", "edge12"), // paper portfolio shown
+  strategy: store.get("strategy2", null), // paper portfolio shown (null = the live one)
   minEdge: store.get("minEdgeBlend", 0.01),
   calLine: null, // calibration chart: null = all lines pooled
   query: "",
@@ -25,6 +25,8 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const pct = (x, d = 0) => (x == null ? "–" : `${(x * 100).toFixed(d)}%`);
 const fix = (x, d = 1) => (x == null ? "–" : x.toFixed(d));
 const ordinal = (n) => `${n}${["th", "st", "nd", "rd"][(n % 100 > 10 && n % 100 < 14) || n % 10 > 3 ? 0 : n % 10]}`;
+// Missing values sometimes arrive as the string "nan" (e.g. wind under a roof).
+const known = (x) => (x == null || x === "" || String(x).toLowerCase() === "nan" ? "" : x);
 const handName = (h) => ({ L: "LHP", R: "RHP" })[h] || "";
 const batsName = (h) => ({ L: "bats L", R: "bats R", S: "switch" })[h] || "";
 
@@ -73,7 +75,12 @@ function mainBook(player, line) {
   return book.find((b) => b.line === line) || book[Math.floor(book.length / 2)] || null;
 }
 // DraftKings' own chance for a price, margin included, as its app shows it (−156 → 61%).
-const implied = (a) => (a == null ? "–" : `${Math.round((a > 0 ? 100 / (a + 100) : -a / (-a + 100)) * 100)}%`);
+const impliedP = (a) => (a == null ? null : a > 0 ? 100 / (a + 100) : -a / (-a + 100));
+const implied = (a) => (a == null ? "–" : pct(impliedP(a)));
+// Edges are small (mostly 1–4%), so they get one decimal: "+2.4%", never a rounded "+2%".
+const edgeText = (ev) => signedPct(ev, 1);
+const sideName = (side) => (side === "over" ? "Over" : "Under");
+const unitName = (kind) => (kind === "pitcher" ? "K" : "H+R+RBI");
 // Its own meta line: "DK 4.5: O +127 (44%) · U −156 (61%)" for the line shown (or the
 // player's main DK line).
 function bookMetaAt(player, line) {
@@ -86,7 +93,7 @@ function bookMetaAt(player, line) {
 function valueBadge(player) {
   const bb = bestBet(player);
   if (!bb || bb.ev < state.minEdge) return "";
-  return `<span class="badge">${CHECK}${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${american(bb.price)} · ${signedPct(bb.ev)}</span>`;
+  return `<span class="badge">${CHECK}${sideName(bb.side)} ${bb.line} at ${american(bb.price)} · edge ${edgeText(bb.ev)}</span>`;
 }
 // A player has an edge when his best DraftKings side clears the chosen minimum edge.
 const hasEdge = (player) => { const bb = bestBet(player); return !!bb && bb.ev >= state.minEdge; };
@@ -95,13 +102,41 @@ const edgeClass = (player) => (hasEdge(player) ? " has-edge" : "");
 // Paper strategies run side by side (older data.json files carry just one).
 const strategies = () => state.data?.paper_strategies || (state.data?.paper ? [state.data.paper] : []);
 
+// Live (blended) strategies first, so a prop's trade shows under the strategy in use.
+const liveFirst = () => [...strategies()].sort((a, b) => (b.source === "blend") - (a.source === "blend"));
+
 // The paper trade recorded for this player's prop in this game, if any, and its strategy.
 function paperTrade(gamePk, playerId, kind) {
-  for (const st of strategies()) {
+  for (const st of liveFirst()) {
     const t = (st.trades || []).find((x) => x.game_pk === gamePk && x.player_id === playerId && x.kind === kind);
     if (t) return { ...t, strategy: st.label };
   }
   return null;
+}
+
+// DraftKings price and its implied %, our blended chance and the edge, side by side, so a
+// row reads the same way as the DraftKings app: "−156 · 61%" there, "ours 63%" here.
+function compareStrip(bb) {
+  return `<span class="compare">
+      <span><small>DraftKings</small><b>${american(bb.price)}</b><i>${implied(bb.price)}</i></span>
+      <span><small>Our chance</small><b>${pct(bb.p)}</b></span>
+      <span class="edge"><small>Edge</small><b>${edgeText(bb.ev)}</b></span>
+    </span>`;
+}
+function tradePill(trade) {
+  if (!trade) return "";
+  const res = trade.result === "open" ? "open" : trade.result;
+  return `<span class="pill trade" title="${esc(trade.strategy || "")}">Paper $${trade.stake} · ${res}</span>`;
+}
+function edgeRow(r, bb, { where = "", stale = false } = {}) {
+  const trade = paperTrade(r.game.game_pk, r.id, r.kind);
+  const proj = r.kind === "batter" && r.confirmed === false ? '<span class="tag">proj</span>' : "";
+  return `
+    <button class="row-btn edge-row${stale ? " stale" : ""}" data-player="${r.kind}" data-game="${r.game.game_pk}" data-id="${r.id}">
+      <span class="who"><b>${esc(r.name)}</b>${proj}${tradePill(trade)}
+        <span class="meta">${sideName(bb.side)} ${bb.line} ${unitName(r.kind)}${where}</span></span>
+      ${compareStrip(bb)}
+    </button>`;
 }
 
 function gameEdges(g) {
@@ -117,23 +152,11 @@ function gameEdges(g) {
     .sort((a, b) => b.bb.ev - a.bb.ev);
   if (!priced) return `<h3 class="section-title">Edges in this game</h3><div class="card"><span class="muted">No DraftKings prices for this game yet.</span></div>`;
   if (!edges.length) return `<h3 class="section-title">Edges in this game</h3>${edgeControl()}<div class="card"><span class="muted">No DraftKings price clears a ${pct(state.minEdge)} edge in this game.</span></div>`;
-  const list = edges.map(({ r, bb }) => {
-    const trade = paperTrade(g.game_pk, r.id, r.kind);
-    const tags = [
-      trade ? `<span class="pill trade">Paper trade $${trade.stake}${trade.strategy ? ` · ${esc(trade.strategy)}` : ""}${trade.result !== "open" ? ` · ${trade.result}` : ""}</span>` : "",
-      r.kind === "batter" && r.confirmed === false ? '<span class="tag">proj</span>' : "",
-    ].join("");
-    return `
-    <button class="row-btn has-edge" data-player="${r.kind}" data-game="${g.game_pk}" data-id="${r.id}">
-      <span class="who"><b>${esc(r.name)}</b>${tags}
-        <span class="meta">${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${r.kind === "pitcher" ? "K" : "H+R+RBI"} · ${american(bb.price)} · chance ${pct(bb.p)}</span></span>
-      <span class="vals"><b class="pos-text">${signedPct(bb.ev)}</b><small>edge</small></span>
-    </button>`;
-  }).join("");
+  const list = edges.map(({ r, bb }) => edgeRow(r, bb, { where: ` · ${esc(teamAbbr(r.team))}` })).join("");
   return `<h3 class="section-title">Edges in this game · ${edges.length}</h3>
     ${edgeControl()}
     <div class="card list">${list}</div>
-    <p class="note">Every DraftKings price in this game at or above your minimum edge. Highlighted rows below are the same players. "proj" = lineup not posted yet (left out of Value picks and paper trades).</p>`;
+    <p class="note">Every DraftKings price in this game at or above your minimum edge. DraftKings % is its own chance with its margin, as its app shows it; our chance blends that price with the model. Highlighted rows below are the same players. "proj" = lineup not posted yet (left out of Value picks and paper trades).</p>`;
 }
 
 function oddsNote() {
@@ -165,27 +188,36 @@ function valuePicks() {
     .sort((a, b) => b.bb.ev - a.bb.ev).slice(0, 12);
   const rows = picks.map(({ p, bb }) => {
     const mins = bb.fetchedAt ? Math.round((Date.now() - Date.parse(bb.fetchedAt)) / 60000) : null;
-    const age = mins == null ? "" : `<span class="meta">Price ${mins < 60 ? `${mins} min` : `${(mins / 60).toFixed(1)} h`} old</span>`;
-    return `
-    <button class="row-btn ${mins != null && mins > 90 ? "stale" : ""}" data-player="${p.kind}" data-game="${p.game.game_pk}" data-id="${p.id}">
-      <span class="who"><b>${esc(p.name)}</b>
-        <span class="meta">${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${p.kind === "pitcher" ? "K" : "H+R+RBI"} · ${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))}</span>${age}</span>
-      <span class="vals"><b class="pos-text">${signedPct(bb.ev)}</b><small>${american(bb.price)} · chance ${pct(bb.p)}</small></span>
-    </button>`;
+    const age = mins == null ? "" : ` · price ${mins < 60 ? `${mins} min` : `${(mins / 60).toFixed(1)} h`} old`;
+    const where = ` · ${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))}${age}`;
+    return edgeRow(p, bb, { where, stale: mins != null && mins > 90 });
   }).join("");
   return `<h2 class="section-title">Value picks · DraftKings</h2>
     ${edgeControl()}
     ${picks.length ? `<div class="card list">${rows}</div>` : `<div class="card"><span class="muted">Nothing above a ${pct(state.minEdge)} edge right now.</span></div>`}
-    <p class="note">Edge = how much a $1 bet is expected to return above your stake at DraftKings' price, using a blend of DraftKings' own chance and the model's (on past prices DraftKings is the more accurate of the two, so the blend leans on it). Expect few edges, mostly small; check Record → vs DraftKings before trusting them. Greyed = price over 90 minutes old. Hitters from projected lineups are left out until their lineup posts.</p>
+    <p class="note">Edge = how much a $1 bet is expected to return above your stake at DraftKings' price, using our chance: a blend of DraftKings' own chance and the model's (on past prices DraftKings is the more accurate of the two, so the blend leans on it). Expect few edges, mostly small; check Record → vs DraftKings before trusting them. Greyed = price over 90 minutes old. Hitters from projected lineups are left out until their lineup posts.</p>
     ${oddsNote()}`;
 }
+// One row per bet, as DraftKings lists them: price and implied %, our chance, the edge, and
+// whether a paper trade took it. The model's own chance sits in a muted line underneath.
 function bookTable(player) {
   if (!player.book?.length) return "";
-  const cell = (ev) => `<td class="${ev != null && ev >= state.minEdge ? "edge-pos" : ""}">${signedPct(ev)}</td>`;
-  const rows = player.book.map((b) => `<tr><td>${b.line}</td><td>${american(b.over)}<br><span class="muted small">${american(b.under)}</span></td><td>${pct(b.p_model)}</td><td>${pct(b.p_book)}</td><td><b>${pct(b.p_blend ?? b.p_model)}</b></td>${cell(b.ev_over)}${cell(b.ev_under)}</tr>`).join("");
-  return `<h3 class="section-title">DraftKings</h3>
-    <table><thead><tr><th>Line</th><th>O / U</th><th>Model</th><th>DK</th><th>Blend</th><th>Edge O</th><th>Edge U</th></tr></thead><tbody>${rows}</tbody></table>
-    <p class="note">Chances of the over. DK = its price with the margin taken out; Blend = DraftKings' chance tilted by the model, which the edges use.</p>`;
+  const trade = paperTrade(player.game.game_pk, player.id, player.kind);
+  const rows = player.book.map((b) => {
+    const po = b.p_blend ?? b.p_model;
+    const side = (s) => {
+      if (b[s] == null) return "";
+      const ev = b[`ev_${s}`];
+      const on = ev != null && ev >= state.minEdge;
+      const taken = trade && trade.line === b.line && trade.side === s;
+      return `<tr class="${on ? "edge-on" : ""}"><td>${s === "over" ? "O" : "U"} ${b.line}${taken ? ` ${tradePill(trade)}` : ""}</td><td>${american(b[s])}</td><td>${implied(b[s])}</td><td><b>${pct(s === "over" ? po : 1 - po)}</b></td><td class="${on ? "edge-pos" : ev != null && ev < 0 ? "muted" : ""}">${edgeText(ev)}</td></tr>`;
+    };
+    return side("over") + side("under");
+  }).join("");
+  const modelOnly = player.book.map((b) => `${b.line}: ${pct(b.p_model)}`).join(" · ");
+  return `<h3 class="section-title">DraftKings vs our chance</h3>
+    <div class="card"><table class="book"><thead><tr><th>Bet</th><th>DK</th><th>DK %</th><th>Ours</th><th>Edge</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="note">DK % = DraftKings' own chance, margin included, as its app shows it. Ours = that price, margin removed, tilted by the model; edges use it. Edge = expected return per $1 at DraftKings' price; green = at or above your minimum (${pct(state.minEdge)}). The model alone says over ${modelOnly}.</p>`;
 }
 
 // ---------- data access ----------
@@ -336,7 +368,7 @@ function gameCard(g) {
       ? `<span class="chip ok">${esc(teamAbbr(g[side]))} lineup posted</span>`
       : `<span class="chip">${esc(teamAbbr(g[side]))} lineup projected</span>`;
   };
-  const weather = [g.temp_f != null ? `${Math.round(g.temp_f)}°F` : "", g.wind || ""].filter(Boolean).join(", ");
+  const weather = [g.temp_f != null ? `${Math.round(g.temp_f)}°F` : "", known(g.wind)].filter(Boolean).join(", ");
   const sp = (side) => g.pitchers[side] ? `${esc(g.pitchers[side].name)} <span class="muted">${handName(g.pitchers[side].hand)}</span>` : "TBD";
   return `
     <button class="card game" data-game="${g.game_pk}">
@@ -398,7 +430,7 @@ function gameSheet(g) {
     ? pitcherRow({ ...g.pitchers[side], game: g, side, team: g[side], opp: g[side === "home" ? "away" : "home"] }, state.pitLine)
     : `<div class="row-btn"><span class="who"><b>${esc(teamAbbr(g[side]))} starter TBD</b></span></div>`).join("");
   const facts = [gameTime(g.time), g.venue, g.umpire ? `HP umpire ${g.umpire}` : "",
-    g.temp_f != null ? `${Math.round(g.temp_f)}°F` : "", g.wind || ""].filter(Boolean).map(esc).join(" · ");
+    g.temp_f != null ? `${Math.round(g.temp_f)}°F` : "", known(g.wind)].filter(Boolean).map(esc).join(" · ");
   return `
     <div class="detail">
       <h2 id="sheet-title">${esc(g.away.name)} @ ${esc(g.home.name)}</h2>
@@ -435,7 +467,7 @@ function playerSheet(kind, p) {
   const s = p.stats || {};
   const r1 = (x) => (x == null ? null : x.toFixed(1));
   const r2 = (x) => (x == null ? null : x.toFixed(2));
-  const factor = (x) => (x == null ? null : `${x >= 1 ? "+" : "−"}${Math.abs((x - 1) * 100).toFixed(0)}%`);
+  const factor = (x) => (x == null ? null : Math.round((x - 1) * 100) === 0 ? "none" : `${x >= 1 ? "+" : "−"}${Math.abs((x - 1) * 100).toFixed(0)}%`);
   if (kind === "pitcher") {
     return `
       <div class="detail">
@@ -636,7 +668,7 @@ function tradeRow(t) {
   return `
     <div class="row-btn">
       <span class="who"><b>${esc(t.player_name || "")}</b>
-        <span class="meta">${what} · ${american(t.price)} · edge ${signedPct(t.ev)}</span>
+        <span class="meta">${what} · ${american(t.price)} · edge ${edgeText(t.ev)}</span>
         <span class="meta">Placed ${when}${t.clv != null ? ` · CLV ${t.clv >= 0 ? "+" : "−"}${Math.abs(t.clv * 100).toFixed(1)} pts` : ""}</span></span>
       <span class="vals">${right}</span>
     </div>`;
@@ -646,7 +678,7 @@ const edgeRange = (pp) => (pp?.ceiling ? `${pct(pp.threshold)}–${pct(pp.ceilin
 
 function viewPortfolio() {
   const all = strategies();
-  const pp = all.find((x) => x.key === state.strategy) || all[0];
+  const pp = all.find((x) => x.key === state.strategy) || all.find((x) => x.source === "blend") || all[0];
   const toggle = all.length > 1
     ? `<div class="segmented">${all.map((x) => `<button data-strategy="${esc(x.key)}" class="${x === pp ? "on" : ""}">${esc(x.label)}</button>`).join("")}</div>`
     : "";
@@ -657,7 +689,8 @@ function viewPortfolio() {
       }).join("")}</tbody></table></div>`
     : "";
   const band = pp?.ceiling ? `, as long as that edge is below ${pct(pp.ceiling)}` : "";
-  const rules = `<p class="note">Paper trading: $${pp?.stake ?? 10} on every DraftKings price with a model edge of at least ${pct(pp?.threshold ?? 0.12)}, at the first price that clears it${band} (one trade per player and prop per game). Hitters from projected lineups are skipped. Trades are recorded automatically every run and settled from the box score; void = refunded.${all.length > 1 ? " The strategies run side by side on the same prices." : ""}</p>`;
+  const basis = pp?.source === "model" ? "the model's own chance (retired Oct 6, 2026; it keeps its record but takes no new trades)" : "our blended chance";
+  const rules = `<p class="note">Paper trading: $${pp?.stake ?? 10} on every DraftKings price whose edge, using ${basis}, is at least ${pct(pp?.threshold ?? 0.12)}, at the first price that clears it${band} (one trade per player and prop per game). Hitters from projected lineups are skipped. Trades are recorded automatically every run and settled from the box score; void = refunded.${all.length > 1 ? " The strategies run side by side on the same prices." : ""}</p>`;
   const head = `<h2 class="section-title">Paper Portfolio</h2>${toggle}${compare}`;
   if (!pp || !pp.summary?.n) {
     return `${head}<div class="empty">No paper trades yet.<br><span class="muted">One is recorded the first time a DraftKings price shows an edge of ${edgeRange(pp)}.</span></div>${rules}`;
@@ -741,7 +774,7 @@ document.addEventListener("click", (ev) => {
     if (g && !$("#sheet").hidden) { $("#sheet-body").innerHTML = gameSheet(g); bindCharts($("#sheet-body")); }
   }
   else if (t.dataset.calLine !== undefined) { state.calLine = t.dataset.calLine === "" ? null : t.dataset.calLine; render(); }
-  else if (t.dataset.strategy) { state.strategy = t.dataset.strategy; store.set("strategy", state.strategy); render(); }
+  else if (t.dataset.strategy) { state.strategy = t.dataset.strategy; store.set("strategy2", state.strategy); render(); }
   else if (t.dataset.rec) { state.recKind = t.dataset.rec; state.calLine = null; store.set("recKind", state.recKind); render(); }
   else if (t.dataset.sheetLine) {
     state.sheetLine = Number(t.dataset.sheetLine);
