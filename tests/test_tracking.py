@@ -287,6 +287,22 @@ def test_paper_band_strategy():
     assert st["blend1"]["summary"]["n"] == 5 and st["edge12"]["summary"]["n"] == 0
 
 
+def test_strikeout_trades_wait_for_the_opposing_lineup():
+    rows = []
+    for minutes, confirmed, ev in ((1440, False, 0.20), (300, False, 0.15), (90, True, 0.05), (60, True, 0.30)):
+        r = _snap(minutes, 5.5, 110, -130)
+        r.update(ev_over=ev, ev_under=-0.3, p_blend=0.55, status="graded", over_won=True,
+                 opp_lineup_confirmed=confirmed, clv_over=np.nan, close_line=np.nan)
+        rows.append(r)
+    t = tracking.paper_trades(pd.DataFrame(rows), threshold=0.01, source="blend")
+    # Not the 24 h or 5 h prices against a projected lineup: the first price once it's posted.
+    assert len(t) == 1 and t.iloc[0]["ev"] == pytest.approx(0.05)
+    # Rows logged before the column existed keep their trades.
+    old = pd.DataFrame(rows).assign(opp_lineup_confirmed=None)
+    t = tracking.paper_trades(old, threshold=0.01, source="blend")
+    assert len(t) == 1 and t.iloc[0]["ev"] == pytest.approx(0.20)
+
+
 def test_paper_portfolio_end_to_end(fake, dk, tmp_path):
     data = _publish(tmp_path, RUN1)
     assert data["paper_strategies"][0] == data["paper"]

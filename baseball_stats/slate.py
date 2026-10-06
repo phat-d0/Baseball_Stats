@@ -34,7 +34,9 @@ def pending_rows(games: pd.DataFrame, lineups: pd.DataFrame,
     """Placeholder batter/pitcher rows (no stats) for not-yet-played games.
 
     Teams without a posted lineup get ``projected`` (their last starting nine),
-    flagged with ``lineup_confirmed = False``.
+    flagged with ``lineup_confirmed = False``. Starters carry ``opp_lineup_confirmed``:
+    whether the lineup they face is posted (strikeout edges on projected lineups are
+    much weaker, docs/edge_lineups.md).
     """
     pit_rows, bat_rows = [], []
     probable, opp_of = {}, {}
@@ -52,6 +54,8 @@ def pending_rows(games: pd.DataFrame, lineups: pd.DataFrame,
                 })
 
     posted = {(r.game_pk, r.team_id) for r in lineups.itertuples(index=False)}
+    for r in pit_rows:
+        r["opp_lineup_confirmed"] = (r["game_pk"], r["opp_team_id"]) in posted
     rows = [(r, True) for r in lineups.itertuples(index=False) if r.game_pk in set(games["game_pk"])]
     if projected is not None and not projected.empty:
         by_team = {t: grp for t, grp in projected.groupby("team_id")}
@@ -126,6 +130,10 @@ def build_slate(day: date, inputs: dict[str, pd.DataFrame] | None = None,
         conf = bat_p.set_index(["game_pk", "player_id"])["lineup_confirmed"]
         idx = pd.MultiIndex.from_frame(result["batter_hrr"][["game_pk", "player_id"]])
         result["batter_hrr"]["lineup_confirmed"] = conf.reindex(idx).to_numpy()
+    if "opp_lineup_confirmed" in pit_p:
+        conf = pit_p.set_index(["game_pk", "player_id"])["opp_lineup_confirmed"]
+        idx = pd.MultiIndex.from_frame(result["pitcher_k"][["game_pk", "player_id"]])
+        result["pitcher_k"]["opp_lineup_confirmed"] = conf.reindex(idx).to_numpy()
     result["games"] = games.reset_index(drop=True)
     if include_history:
         for k, v in out.items():
