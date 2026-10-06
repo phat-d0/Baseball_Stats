@@ -23,6 +23,8 @@ icon, works offline, and follows your phone's dark mode. Tabs:
 - **Pitchers**: starters ranked by projected strikeouts, with the chance of going over
   3.5–7.5. Tap one for the distribution, fair odds and why (recent form, opposing lineup's
   strikeout rate, umpire, park).
+- **Portfolio**: paper trades ($10 each) for each strategy, settled from box scores, with
+  profit over time; the main strategy bets blended edges of 1% or more.
 - **Record**: how the model did over the most recent 30 days it wasn't trained on: how much
   better its over/under chances are than the player's season average (log loss across the
   lines), average miss, the daily top-10 picks' hit rate, and a calibration chart showing
