@@ -61,6 +61,7 @@ def test_publish_end_to_end(fake, tmp_path):
     g = loaded["slates"][0]["games"][0]
     sp = g["pitchers"]["home"]
     assert sp["mu"] > 0 and sum(sp["pmf"]) == pytest.approx(1, abs=1e-3)
+    assert sp["opp_lineup_confirmed"] is all(b["confirmed"] for b in g["lineups"]["away"])
     assert len(g["lineups"]["home"]) == 9 and all(b["confirmed"] for b in g["lineups"]["home"])
     assert [b["order"] for b in g["lineups"]["away"]] == list(range(1, 10))
     rec = loaded["record"]["batter"]

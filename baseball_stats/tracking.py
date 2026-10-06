@@ -51,6 +51,11 @@ def _ts(x) -> pd.Timestamp | None:
     return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
 
 
+def _opp_confirmed(r) -> bool | None:
+    v = r.get("opp_lineup_confirmed")
+    return None if v is None or pd.isna(v) else bool(v)
+
+
 def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict,
                   shadow=None) -> pd.DataFrame:
     """``prop_snapshots`` rows for every player on the slate with DraftKings lines."""
@@ -99,6 +104,7 @@ def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict,
                     "lineup_confirmed": bool(r.get("lineup_confirmed", True))
                     if kind == "batter" else True,
                     "batting_order": r.get("batting_order") if kind == "batter" else None,
+                    "opp_lineup_confirmed": _opp_confirmed(r) if kind == "pitcher" else None,
                     "code_sha": sha,
                 })
     df = pd.DataFrame(rows)
@@ -442,8 +448,10 @@ def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
 
     A trade is placed at the first logged DraftKings price whose best side clears the
     threshold (one per player, game and prop), exactly as the Value picks list shows it:
-    hitters from projected lineups are skipped. The log is append-only and stores the
-    model's numbers at download time, so recorded trades never change afterwards.
+    hitters from projected lineups are skipped, and so are starters facing one. The log
+    is append-only and stores the model's numbers at download time, so recorded trades
+    never change afterwards (rows logged before ``opp_lineup_confirmed`` existed count
+    as confirmed, so their trades stay).
     """
     if grades is None or grades.empty:
         return pd.DataFrame()
@@ -453,6 +461,9 @@ def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
         g = g[blended if source == "blend" else ~blended]
     if "lineup_confirmed" in g:
         g = g[(g["kind"] == "pitcher") | g["lineup_confirmed"].fillna(True).astype(bool)]
+    if "opp_lineup_confirmed" in g:
+        opp = g["opp_lineup_confirmed"].astype(object).fillna(True).astype(bool)
+        g = g[(g["kind"] != "pitcher") | opp]
     t = picks(g, threshold)
     if ceiling is not None and not t.empty:
         t = t[t["ev"] < ceiling].copy()
