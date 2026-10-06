@@ -144,9 +144,18 @@ class PASeqK(_Base):
 # --------------------------------------------------------------------------- #
 
 def train(name: str, pa: pd.DataFrame, built: dict, starts: pd.DataFrame,
-          fallback: model.CountModel, players: pd.DataFrame) -> _Base:
-    """Fit a plate-appearance strikeout model. ``starts``: training pitcher_k rows."""
+          fallback: model.CountModel, players: pd.DataFrame, *,
+          batter_games: pd.DataFrame | None = None, n_sims: int | None = None) -> _Base:
+    """Fit a plate-appearance model. ``starts``: training pitcher_k rows (pitcher models)."""
     outcome = pa_model.OutcomeModel().fit(pa, built)
+    if name == "pa_sim":
+        from . import game_sim
+        bg = batter_games if batter_games is not None else pd.DataFrame()
+        return GameSimH(outcome=outcome, fallback=fallback, players=players,
+                        stay=pa_model.StayModel().fit(pa, built), sampler=pa_model.PitchSampler().fit(pa),
+                        transitions=game_sim.Transitions.from_pa(pa),
+                        stay_prob=game_sim.stay_in_lineup(pa, bg[bg["game_pk"].isin(pa["game_pk"])]),
+                        n_sims=n_sims or game_sim.N_SIMS)
     if name == "pa_simple":
         bf = model.CountModel("pitcher").fit(starts.assign(target_k=starts["target_bf"]))
         return PASimpleK(outcome=outcome, fallback=fallback, players=players, bf_model=bf)
@@ -160,14 +169,21 @@ def model_dir() -> Path:
     return config.PROCESSED_DIR / "models"
 
 
+KIND_OF = {"pa_simple": "pitcher", "pa_seq": "pitcher", "pa_sim": "batter"}
+
+
 def _stamp_path(name: str) -> Path:
-    return model_dir() / f"pitcher_{name}.json"
+    return model_dir() / f"{KIND_OF[name]}_{name}.json"
+
+
+def _model_path(name: str) -> Path:
+    return model_dir() / f"{KIND_OF[name]}_{name}.joblib"
 
 
 def is_stale(name: str, now: datetime, latest_pa: str | None) -> bool:
     """Retrain when missing, built by another scikit-learn, or a newer day of plate
     appearances has arrived (normally once a day, when yesterday's Statcast lands)."""
-    path = model_dir() / f"pitcher_{name}.joblib"
+    path = _model_path(name)
     if not path.exists() or not _stamp_path(name).exists():
         return True
     stamp = json.loads(_stamp_path(name).read_text())
@@ -180,8 +196,9 @@ def is_stale(name: str, now: datetime, latest_pa: str | None) -> bool:
 
 def save(m: _Base, now: datetime, latest_pa: str | None, record: dict | None = None) -> None:
     model_dir().mkdir(parents=True, exist_ok=True)
-    keep = {k: getattr(m, k) for k in m.__dataclass_fields__ if k not in ("ctx", "players", "fallback", "last_exp_bf")}
-    joblib.dump(keep, model_dir() / f"pitcher_{m.name}.joblib")
+    keep = {k: getattr(m, k) for k in m.__dataclass_fields__
+            if k not in ("ctx", "players", "fallback", "last_exp_bf", "last_parts")}
+    joblib.dump(keep, _model_path(m.name))
     _stamp_path(m.name).write_text(json.dumps({
         "sklearn": sklearn.__version__, "trained_on": now.date().isoformat(),
         "trained_at": now.isoformat(timespec="seconds"), "latest_game_date": latest_pa,
@@ -189,8 +206,8 @@ def save(m: _Base, now: datetime, latest_pa: str | None, record: dict | None = N
 
 
 def load(name: str, fallback: model.CountModel, players: pd.DataFrame) -> tuple[_Base, dict]:
-    keep = joblib.load(model_dir() / f"pitcher_{name}.joblib")
-    cls = PASimpleK if name == "pa_simple" else PASeqK
+    keep = joblib.load(_model_path(name))
+    cls = {"pa_simple": PASimpleK, "pa_seq": PASeqK, "pa_sim": GameSimH}[name]
     m = cls(**keep, fallback=fallback, players=players)
     stamp = json.loads(_stamp_path(name).read_text())
     return m, stamp.get("record") or {}
@@ -198,19 +215,23 @@ def load(name: str, fallback: model.CountModel, players: pd.DataFrame) -> tuple[
 
 def holdout_record(name: str, pa: pd.DataFrame, built: dict, hist: pd.DataFrame,
                    fallback_params: dict | None, players: pd.DataFrame, lines: list[float],
-                   test_days: int = 30) -> dict:
+                   test_days: int = 30, batter_games: pd.DataFrame | None = None,
+                   n_sims: int | None = None) -> dict:
     """The Record tab's 30-day check for a plate-appearance model (computed daily)."""
-    rows = model.training_rows(hist, "pitcher")
+    kind = KIND_OF[name]
+    rows = model.training_rows(hist, kind)
     cutoff = rows["game_date"].max() - pd.Timedelta(days=test_days)
     train_rows, test = rows[rows["game_date"] <= cutoff], rows[rows["game_date"] > cutoff]
     pa_train = pa[pd.to_datetime(pa["game_date"]) <= cutoff]
     if len(test) < 50 or len(pa_train) < 5000:
         return {}
-    fb = model.CountModel("pitcher").fit(train_rows)
-    fb.alpha = model.fit_alpha(test["target_k"].to_numpy(), fb.predict(test))
-    m = train(name, pa_train, built, train_rows, fb, players).for_slate(built, players)
+    target = model.TARGETS[kind]
+    fb = model.CountModel(kind).fit(train_rows)
+    fb.alpha = model.fit_alpha(test[target].to_numpy(), fb.predict(test))
+    m = train(name, pa_train, built, train_rows if kind == "pitcher" else None, fb, players,
+              batter_games=batter_games, n_sims=n_sims).for_slate(built, players)
     mu, dist = m.distribution(test)
-    return model.summarize_holdout(test, "pitcher", mu, dist, lines, alpha_for_baseline=fb.alpha)
+    return model.summarize_holdout(test, kind, mu, dist, lines, alpha_for_baseline=fb.alpha)
 
 
 def now_utc() -> datetime:

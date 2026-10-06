@@ -63,9 +63,10 @@ def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict,
         sub = table.iloc[have]
         active = models[kind].for_slate(slate)
         mu, dist = active.distribution(sub)
+        sh_model = shadow.get(kind) if isinstance(shadow, dict) else (shadow if kind == "pitcher" else None)
         sh_dist = None
-        if shadow is not None and kind == "pitcher":
-            _, sh_dist = shadow.for_slate(slate).distribution(sub)
+        if sh_model is not None:
+            _, sh_dist = sh_model.for_slate(slate).distribution(sub)
         for j, ((_, r), m, d) in enumerate(zip(sub.iterrows(), mu, dist)):
             g = games.loc[r["game_pk"]]
             start = _ts(g.get("game_datetime"))
@@ -89,7 +90,7 @@ def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict,
                     "model_name": active.name,
                     "p_shadow": float(model.p_over(sh_dist[j][None, :], e["line"])[0])
                     if sh_dist is not None else None,
-                    "shadow_name": shadow.name if sh_dist is not None else None,
+                    "shadow_name": sh_model.name if sh_dist is not None else None,
                     **line_values(e, d),
                     "lineup_confirmed": bool(r.get("lineup_confirmed", True))
                     if kind == "batter" else True,

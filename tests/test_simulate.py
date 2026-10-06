@@ -86,9 +86,11 @@ def pa_env(fake, monkeypatch):
     return fake
 
 
-def _run(tmp_path, monkeypatch, active="current", shadow=""):
+def _run(tmp_path, monkeypatch, active="current", shadow="", batter="current", batter_shadow=""):
     monkeypatch.setenv("BASEBALL_MODEL_PITCHER", active)
     monkeypatch.setenv("BASEBALL_SHADOW_PITCHER", shadow)
+    monkeypatch.setenv("BASEBALL_MODEL_BATTER", batter)
+    monkeypatch.setenv("BASEBALL_SHADOW_BATTER", batter_shadow)
     return publish.publish(tmp_path / "site", history_start=START, now=RUN, statcast=True)
 
 
@@ -202,3 +204,22 @@ def test_transitions_from_data(fake):
     away, home = _team(["1B", "OUT", "BB", "HR", "K", "OUT", "2B", "K", "OUT"]), _team(["OUT"] * 9)
     sim = game_sim.simulate_game(away, home, t, sub, _sampler(), seed=2, n_sims=500)
     assert (sim["away"]["R"].sum(axis=1) == sim["score"][:, 0]).all()
+
+
+def test_hitter_shadow_logs_without_changing_the_app(pa_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(publish, "SHADOW_SIMS", 300)
+    plain = _run(tmp_path, monkeypatch)
+    storage.table_path("prop_snapshots").unlink()
+    odds.Ledger().save()  # forget the download so the prices are logged again
+    shadowed = _run(tmp_path, monkeypatch, batter_shadow="pa_sim")
+    a = plain["slates"][0]["games"][0]["lineups"]["home"]
+    b = shadowed["slates"][0]["games"][0]["lineups"]["home"]
+    assert [x["pmf"] for x in a] == [x["pmf"] for x in b]
+    snaps = storage.read("prop_snapshots")
+    bat = snaps[snaps["kind"] == "batter"]
+    if not bat.empty:
+        assert bat["p_shadow"].notna().all() and set(bat["shadow_name"]) == {"pa_sim"}
+    assert shadowed["model"]["batter"]["shadow"] == "pa_sim"
+    assert shadowed["model"]["batter"]["name"] == "current"
+    stamp = json.loads(sim_models._stamp_path("pa_sim").read_text())
+    assert stamp["record"] == {}  # shadow models skip the 30-day replay

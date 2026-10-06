@@ -466,6 +466,7 @@ function playerSheet(kind, p) {
         ["xwOBA, season", s.xwoba_szn == null ? null : s.xwoba_szn.toFixed(3)], ["Games, season", s.games_szn == null ? null : String(s.games_szn)],
         ["Opp. starter K%", s.opp_sp_k_pct == null ? null : pct(s.opp_sp_k_pct, 1)], ["Opp. starter ERA", r2(s.opp_sp_era)],
         ["Park run effect", factor(s.park_r_factor)], ["Bats", batsName(p.bats)],
+        ["Expected hits", r2(s.exp_h)], ["Expected runs", r2(s.exp_r)], ["Expected RBIs", r2(s.exp_rbi)],
       ])}
     </div>`;
 }
@@ -504,6 +505,7 @@ const MODEL_NAMES = {
   current: "game-level model",
   pa_simple: "plate-appearance model (each hitter's strikeout chance × batters faced)",
   pa_seq: "batter-by-batter simulation",
+  pa_sim: "whole-game simulation (both lineups, plate appearance by plate appearance)",
 };
 function modelNote(kind) {
   const m = state.data?.model?.[kind];

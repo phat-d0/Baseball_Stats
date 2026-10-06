@@ -202,10 +202,19 @@ DraftKings price (`p_shadow`) so the Record tab can compare both against the mar
 
 - Switch with repository variables `BASEBALL_MODEL_PITCHER` (`current`, `pa_simple`,
   `pa_seq`) and `BASEBALL_SHADOW_PITCHER` (or empty).
-- The plate-appearance models train once a day (first run after 10:00 UTC, or when missing
-  or built with another scikit-learn) and are saved under `data/processed/models/`; other
-  runs load them (~1 minute per publish; ~5 minutes on the daily training run).
+- The plate-appearance models retrain when a newer day of plate appearances arrives
+  (normally once a day), or when missing or built with another scikit-learn, and are saved
+  under `data/processed/models/`; other runs load them (~1 minute per publish; ~5 minutes on
+  the training run).
 - Starters without a known opposing lineup fall back to the game-level model.
+
+### Hitters: whole-game simulation (shadow)
+
+`pa_sim` simulates both lineups plate appearance by plate appearance through nine innings
+(`baseball_stats/game_sim.py`) and counts each hitter's H+R+RBI. It did **not** pass the
+Phase 2 gate (`docs/gate_phase2_batter.md`), so hitters stay on the game-level model and
+`pa_sim` runs in shadow at 4,000 simulations a game. Switch with `BASEBALL_MODEL_BATTER`
+(`current`, `pa_sim`) and `BASEBALL_SHADOW_BATTER` (or empty).
 
 ## Modelling notes
 
