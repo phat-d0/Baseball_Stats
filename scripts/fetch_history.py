@@ -6,7 +6,13 @@ event's strikeout and H+R+RBI props as they stood ``--minutes-before`` first pit
 there are skipped, so an interrupted run resumes where it stopped. Stops before the
 balance falls under ``--reserve`` or this run has spent ``--max-credits``.
 
+The default snapshot (an hour before) goes straight into ``--out``; any other time goes
+into its own subfolder, ``--out/m360`` for six hours, so the snapshots never mix and
+backtests read one time at a time.
+
     ODDS_API_KEY=... python scripts/fetch_history.py --start 2026-08-01 --end 2026-09-28
+    ODDS_API_KEY=... python scripts/fetch_history.py --start 2026-08-01 --end 2026-09-27 \
+        --minutes-before 360
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import requests
 
 BASE = "https://api.the-odds-api.com/v4/historical/sports/baseball_mlb"
 MARKETS = "pitcher_strikeouts,batter_hits_runs_rbis"
+DEFAULT_MINUTES = 60
 
 
 def iso(t: datetime) -> str:
@@ -55,6 +62,10 @@ class Client:
         return r.json()
 
 
+def snapshot_dir(out: Path, minutes_before: int) -> Path:
+    return out if minutes_before == DEFAULT_MINUTES else out / f"m{minutes_before}"
+
+
 def day_events(c: Client, d: date) -> list[dict]:
     """Events starting from 12:00 UTC on ``d`` to 12:00 UTC the next day (US game day)."""
     lo = datetime(d.year, d.month, d.day, 12, tzinfo=UTC)
@@ -71,9 +82,9 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", required=True)
     ap.add_argument("--end", required=True)
-    ap.add_argument("--minutes-before", type=int, default=60)
+    ap.add_argument("--minutes-before", type=int, default=DEFAULT_MINUTES)
     ap.add_argument("--max-credits", type=int, default=20000)
-    ap.add_argument("--reserve", type=int, default=20000,
+    ap.add_argument("--reserve", type=int, default=25000,
                     help="leave at least this many credits for the live apps")
     ap.add_argument("--out", default="odds_history")
     args = ap.parse_args(argv)
@@ -81,7 +92,7 @@ def main(argv=None) -> int:
     if not key:
         print("ODDS_API_KEY is not set", file=sys.stderr)
         return 1
-    out = Path(args.out)
+    out = snapshot_dir(Path(args.out), args.minutes_before)
     out.mkdir(parents=True, exist_ok=True)
     c = Client(key, args.max_credits, args.reserve)
     d, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
