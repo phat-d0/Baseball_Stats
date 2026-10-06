@@ -4,9 +4,9 @@ name: Publish app
 
 on:
   schedule:
-    # Every hour, plus every 20 minutes from 15:00 to 02:59 UTC (11am-10:59pm US Eastern),
-    # when probable starters change, lineups get posted and props are re-priced every
-    # 30 minutes before first pitch. GitHub may start scheduled runs a few minutes late.
+    # Hourly, plus every 20 minutes from 15:00 to 02:59 UTC (11am-10:59pm US Eastern).
+    # GitHub runs these late or skips them, so the "next" job below also chains runs
+    # every 20 minutes through the game-day window; the schedule restarts the chain.
     - cron: "7 * * * *"
     - cron: "27,47 15-23,0-2 * * *"
   workflow_dispatch: # "Run workflow" button in the Actions tab
@@ -125,3 +125,34 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # GitHub starts frequent schedules late or skips them (in practice about every 2 hours),
+  # which is too slow for re-pricing props every 30 minutes before first pitch. So during
+  # the game-day window each run queues the next one itself, 20 minutes after it started.
+  # The schedule above restarts the chain if it ever breaks.
+  next:
+    needs: deploy
+    if: always() && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Queue the next run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          REF: ${{ github.ref_name }}
+        run: |
+          # Window: 10:00-03:59 UTC (6am-11:59pm US Eastern).
+          hour=$(date -u +%-H)
+          if [ "$hour" -ge 4 ] && [ "$hour" -lt 10 ]; then echo "outside the game-day window"; exit 0; fi
+          started=$(gh run view "$RUN_ID" --repo "$REPO" --json startedAt --jq .startedAt)
+          wait=$(( 1200 - ( $(date -u +%s) - $(date -u -d "$started" +%s) ) ))
+          if [ "$wait" -gt 0 ]; then sleep "$wait"; fi
+          others=$(gh run list --repo "$REPO" --workflow publish.yml --limit 20 \
+            --json databaseId,status --jq "[.[] | select(.databaseId != $RUN_ID and (.status == \"queued\" or .status == \"in_progress\" or .status == \"waiting\" or .status == \"pending\" or .status == \"requested\"))] | length")
+          if [ "$others" -gt 0 ]; then echo "another run is already queued or running"; exit 0; fi
+          gh workflow run publish.yml --repo "$REPO" --ref "$REF"
+          echo "queued the next run"
