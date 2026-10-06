@@ -1,0 +1,65 @@
+# Downloads historical DraftKings player props for backtesting (scripts/fetch_history.py)
+# and keeps them on the odds-history branch. Run by hand from the Actions tab; days
+# already downloaded are skipped, so re-running only fills gaps.
+name: Fetch historical prices
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First game day (YYYY-MM-DD)"
+        required: true
+        default: "2026-08-01"
+      end:
+        description: "Last game day (YYYY-MM-DD)"
+        required: true
+        default: "2026-09-28"
+      max_credits:
+        description: "Most credits this run may spend"
+        required: true
+        default: "20000"
+      reserve:
+        description: "Never let the balance fall below this (the live apps share the key)"
+        required: true
+        default: "20000"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: odds-history
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - name: Restore what's already downloaded
+        run: |
+          mkdir -p odds_history
+          if git fetch -q --depth=1 origin odds-history 2>/dev/null; then
+            git --work-tree=odds_history checkout FETCH_HEAD -- . && git reset -q
+            ls odds_history | wc -l
+          fi
+      - name: Download
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: |
+          python scripts/fetch_history.py --start "${{ inputs.start }}" --end "${{ inputs.end }}" \
+            --max-credits "${{ inputs.max_credits }}" --reserve "${{ inputs.reserve }}" --out odds_history
+      - name: Save to the odds-history branch
+        if: always()
+        run: |
+          cd odds_history
+          [ -n "$(ls)" ] || exit 0
+          git init -q -b odds-history
+          git add .
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Historical DraftKings props $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" odds-history
