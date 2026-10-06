@@ -12,6 +12,7 @@ const state = {
   batLine: store.get("batLine", 1.5),
   pitLine: store.get("pitLine", 5.5),
   recKind: store.get("recKind", "batter"),
+  strategy: store.get("strategy", "edge12"), // paper portfolio shown
   minEdge: store.get("minEdge", 0.05),
   calLine: null, // calibration chart: null = all lines pooled
   query: "",
@@ -84,10 +85,16 @@ function valueBadge(player) {
 const hasEdge = (player) => { const bb = bestBet(player); return !!bb && bb.ev >= state.minEdge; };
 const edgeClass = (player) => (hasEdge(player) ? " has-edge" : "");
 
-// The paper trade recorded for this player's prop in this game, if any.
+// Paper strategies run side by side (older data.json files carry just one).
+const strategies = () => state.data?.paper_strategies || (state.data?.paper ? [state.data.paper] : []);
+
+// The paper trade recorded for this player's prop in this game, if any, and its strategy.
 function paperTrade(gamePk, playerId, kind) {
-  return (state.data?.paper?.trades || []).find(
-    (t) => t.game_pk === gamePk && t.player_id === playerId && t.kind === kind);
+  for (const st of strategies()) {
+    const t = (st.trades || []).find((x) => x.game_pk === gamePk && x.player_id === playerId && x.kind === kind);
+    if (t) return { ...t, strategy: st.label };
+  }
+  return null;
 }
 
 function gameEdges(g) {
@@ -106,7 +113,7 @@ function gameEdges(g) {
   const list = edges.map(({ r, bb }) => {
     const trade = paperTrade(g.game_pk, r.id, r.kind);
     const tags = [
-      trade ? `<span class="pill trade">Paper trade $${trade.stake}${trade.result !== "open" ? ` · ${trade.result}` : ""}</span>` : "",
+      trade ? `<span class="pill trade">Paper trade $${trade.stake}${trade.strategy ? ` · ${esc(trade.strategy)}` : ""}${trade.result !== "open" ? ` · ${trade.result}` : ""}</span>` : "",
       r.kind === "batter" && r.confirmed === false ? '<span class="tag">proj</span>' : "",
     ].join("");
     return `
@@ -623,17 +630,31 @@ function tradeRow(t) {
     </div>`;
 }
 
+const edgeRange = (pp) => (pp?.ceiling ? `${pct(pp.threshold)}–${pct(pp.ceiling)}` : `${pct(pp?.threshold ?? 0.12)}+`);
+
 function viewPortfolio() {
-  const pp = state.data?.paper;
-  const rules = `<p class="note">Paper trading: $${pp?.stake ?? 10} on every DraftKings price at or above a ${pct(pp?.threshold ?? 0.12)} model edge, at the first price that clears it (one trade per player and prop per game). Hitters from projected lineups are skipped. Trades are recorded automatically every run and settled from the box score; void = refunded.</p>`;
+  const all = strategies();
+  const pp = all.find((x) => x.key === state.strategy) || all[0];
+  const toggle = all.length > 1
+    ? `<div class="segmented">${all.map((x) => `<button data-strategy="${esc(x.key)}" class="${x === pp ? "on" : ""}">${esc(x.label)}</button>`).join("")}</div>`
+    : "";
+  const compare = all.length > 1
+    ? `<div class="card"><table><thead><tr><th>Strategy</th><th>Trades</th><th>Record</th><th>Profit</th><th>Return</th></tr></thead><tbody>${all.map((x) => {
+        const s = x.summary || {};
+        return `<tr><td>${esc(x.label)}</td><td>${s.n || 0}</td><td>${s.n ? `${s.won}–${s.lost}` : "–"}</td><td class="${s.profit > 0 ? "pos-text" : s.profit < 0 ? "neg-text" : ""}">${s.n ? money(s.profit) : "–"}</td><td>${s.n ? signedPct(s.roi, 1) : "–"}</td></tr>`;
+      }).join("")}</tbody></table></div>`
+    : "";
+  const band = pp?.ceiling ? `, as long as that edge is below ${pct(pp.ceiling)}` : "";
+  const rules = `<p class="note">Paper trading: $${pp?.stake ?? 10} on every DraftKings price with a model edge of at least ${pct(pp?.threshold ?? 0.12)}, at the first price that clears it${band} (one trade per player and prop per game). Hitters from projected lineups are skipped. Trades are recorded automatically every run and settled from the box score; void = refunded.${all.length > 1 ? " The strategies run side by side on the same prices." : ""}</p>`;
+  const head = `<h2 class="section-title">Paper Portfolio</h2>${toggle}${compare}`;
   if (!pp || !pp.summary?.n) {
-    return `<h2 class="section-title">Paper Portfolio</h2><div class="empty">No paper trades yet.<br><span class="muted">One is recorded the first time a DraftKings price shows a ${pct(pp?.threshold ?? 0.12)}+ edge.</span></div>${rules}`;
+    return `${head}<div class="empty">No paper trades yet.<br><span class="muted">One is recorded the first time a DraftKings price shows an edge of ${edgeRange(pp)}.</span></div>${rules}`;
   }
   const s = pp.summary;
   const open = pp.trades.filter((t) => t.result === "open");
   const settled = pp.trades.filter((t) => t.result !== "open");
   return `
-    <h2 class="section-title">Paper Portfolio</h2>
+    ${head}
     <div class="tiles">
       <div class="tile"><div class="label">Profit</div><div class="value ${s.profit > 0 ? "pos-text" : s.profit < 0 ? "neg-text" : ""}">${money(s.profit)}</div><div class="sub">on $${s.staked.toFixed(0)} settled</div></div>
       <div class="tile"><div class="label">Return</div><div class="value">${signedPct(s.roi, 1)}</div><div class="sub">avg edge ${pct(s.avg_edge, 0)} at placement</div></div>
@@ -708,6 +729,7 @@ document.addEventListener("click", (ev) => {
     if (g && !$("#sheet").hidden) { $("#sheet-body").innerHTML = gameSheet(g); bindCharts($("#sheet-body")); }
   }
   else if (t.dataset.calLine !== undefined) { state.calLine = t.dataset.calLine === "" ? null : t.dataset.calLine; render(); }
+  else if (t.dataset.strategy) { state.strategy = t.dataset.strategy; store.set("strategy", state.strategy); render(); }
   else if (t.dataset.rec) { state.recKind = t.dataset.rec; state.calLine = null; store.set("recKind", state.recKind); render(); }
   else if (t.dataset.sheetLine) {
     state.sheetLine = Number(t.dataset.sheetLine);

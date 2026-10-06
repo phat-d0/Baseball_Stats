@@ -271,8 +271,22 @@ def test_paper_trades_rules():
     assert s["at_risk"] == 10
 
 
+def test_paper_band_strategy():
+    # 8-12%: only player 3 (10%); player 5 sits exactly at 12%, the ceiling, so it is left out.
+    t = tracking.paper_trades(_paper_grades(), threshold=0.08, ceiling=0.12)
+    assert sorted(t["player_id"]) == [3]
+    assert t.iloc[0]["profit"] == pytest.approx(12.0)
+    both = tracking.paper_strategies(_paper_grades())
+    assert [s["key"] for s in both] == ["edge12", "edge8_12"]
+    assert both[0]["summary"]["n"] == 4 and both[1]["summary"]["n"] == 1
+    assert both[1]["ceiling"] == 0.12 and both[1]["label"]
+
+
 def test_paper_portfolio_end_to_end(fake, dk, tmp_path):
     data = _publish(tmp_path, RUN1)
+    assert data["paper_strategies"][0] == data["paper"]
+    for st in data["paper_strategies"][1:]:
+        assert all(st["threshold"] <= t["ev"] < st["ceiling"] for t in st["trades"])
     paper = data["paper"]
     assert paper["stake"] == 10 and paper["threshold"] == 0.12
     assert all(t["ev"] >= 0.12 and t["result"] == "open" for t in paper["trades"])

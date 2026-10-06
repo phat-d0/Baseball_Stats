@@ -165,15 +165,15 @@ def _stamp_path(name: str) -> Path:
 
 
 def is_stale(name: str, now: datetime, latest_pa: str | None) -> bool:
-    """Retrain when missing, built by another scikit-learn, or not trained today after 10:00 UTC."""
+    """Retrain when missing, built by another scikit-learn, or a newer day of plate
+    appearances has arrived (normally once a day, when yesterday's Statcast lands)."""
     path = model_dir() / f"pitcher_{name}.joblib"
     if not path.exists() or not _stamp_path(name).exists():
         return True
     stamp = json.loads(_stamp_path(name).read_text())
     if stamp.get("sklearn") != sklearn.__version__:
         return True
-    if latest_pa and stamp.get("latest_game_date", "") < latest_pa and now.hour >= 10 \
-            and stamp.get("trained_on") != now.date().isoformat():
+    if latest_pa and stamp.get("latest_game_date", "") < latest_pa:
         return True
     return False
 

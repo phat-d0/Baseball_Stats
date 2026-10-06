@@ -398,11 +398,19 @@ def summary(grades: pd.DataFrame, *, days: int | None = None) -> dict:
 
 PAPER_STAKE = 10.0
 PAPER_EDGE = 0.12
+# Strategies paper traded side by side. The band strategy takes the first price at or
+# above its floor and keeps it only if that edge is below the ceiling, the same cut as
+# the Record tab's edge table.
+PAPER_STRATEGIES = [
+    {"key": "edge12", "label": "12%+ edge", "threshold": 0.12, "ceiling": None},
+    {"key": "edge8_12", "label": "8–12% edge", "threshold": 0.08, "ceiling": 0.12},
+]
 
 
 def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
-                 threshold: float = PAPER_EDGE) -> pd.DataFrame:
-    """Paper bets: $``stake`` on every value pick at or above ``threshold`` edge.
+                 threshold: float = PAPER_EDGE, ceiling: float | None = None) -> pd.DataFrame:
+    """Paper bets: $``stake`` on every value pick at or above ``threshold`` edge
+    (and, with ``ceiling``, below it at the moment it first cleared ``threshold``).
 
     A trade is placed at the first logged DraftKings price whose best side clears the
     threshold (one per player, game and prop), exactly as the Value picks list shows it:
@@ -415,6 +423,8 @@ def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
     if "lineup_confirmed" in g:
         g = g[(g["kind"] == "pitcher") | g["lineup_confirmed"].fillna(True).astype(bool)]
     t = picks(g, threshold)
+    if ceiling is not None and not t.empty:
+        t = t[t["ev"] < ceiling].copy()
     if t.empty:
         return t
     dec = t["price"].map(odds.american_to_decimal).astype(float)
@@ -430,10 +440,12 @@ def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
 
 
 def paper_portfolio(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
-                    threshold: float = PAPER_EDGE, names: dict | None = None) -> dict:
-    """``paper`` in data.json: the paper trades, their totals and daily profit."""
-    t = paper_trades(grades, stake=stake, threshold=threshold)
-    base = {"stake": stake, "threshold": threshold}
+                    threshold: float = PAPER_EDGE, ceiling: float | None = None,
+                    names: dict | None = None, key: str | None = None,
+                    label: str | None = None) -> dict:
+    """One paper strategy in data.json: its trades, their totals and daily profit."""
+    t = paper_trades(grades, stake=stake, threshold=threshold, ceiling=ceiling)
+    base = {"stake": stake, "threshold": threshold, "ceiling": ceiling, "key": key, "label": label}
     if names and not t.empty:  # probable pitchers are logged without a name
         t["player_name"] = t["player_name"].astype(object)  # all-missing names load as float
         missing = t["player_name"].isna() | (t["player_name"].astype(str).str.strip() == "")
@@ -464,3 +476,9 @@ def paper_portfolio(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
                            game_date=pd.to_datetime(trades["game_date"]).dt.date.astype(str),
                            game_start=trades["game_start"].astype(str) if "game_start" in trades else None)
     return {**base, "summary": summary, "curve": curve, "trades": trades.to_dict("records")}
+
+
+def paper_strategies(grades: pd.DataFrame, names: dict | None = None) -> list[dict]:
+    """``paper_strategies`` in data.json: every strategy in ``PAPER_STRATEGIES``."""
+    return [paper_portfolio(grades, threshold=st["threshold"], ceiling=st["ceiling"], names=names,
+                            key=st["key"], label=st["label"]) for st in PAPER_STRATEGIES]

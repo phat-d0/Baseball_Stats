@@ -350,10 +350,11 @@ def publish(out: str | Path, *, history_start: date | None = None,
     # Grade the full log (including prices logged just now) and build the paper portfolio.
     grades = tracking.update_grades()
     market = tracking.summary(grades)
-    paper = tracking.paper_portfolio(grades, names=names)
+    strategies = tracking.paper_strategies(grades, names=names)
     if not grades.empty:
         log.info("price log grades: %s; paper trades: %s", grades["status"].value_counts().to_dict(),
-                 {k: paper["summary"].get(k) for k in ("n", "open", "won", "lost", "profit")})
+                 {st["key"]: {k: st["summary"].get(k) for k in ("n", "open", "won", "lost", "profit")}
+                  for st in strategies})
 
     stored = storage.read("games")
     final = stored[stored["status"] == "Final"] if not stored.empty else stored
@@ -371,7 +372,8 @@ def publish(out: str | Path, *, history_start: date | None = None,
                    for d, s in slates],
         "odds_source": asdict(odds_status),
         "record": {**record, "market": market},
-        "paper": paper,
+        "paper": strategies[0],  # the 12%+ strategy, as before
+        "paper_strategies": strategies,
     }
     data = _clean(data)
 
