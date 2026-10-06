@@ -375,6 +375,13 @@ def summary(grades: pd.DataFrame, *, days: int | None = None) -> dict:
             res.update({"logloss_model": _logloss(close["p_model"], close["over_won"]),
                         "logloss_book": _logloss(close["p_book"], close["over_won"]),
                         "n_lines": int(len(close))})
+            if "p_blend" in close and close["p_blend"].notna().any():
+                # The chance edges use, against DraftKings on the same closing lines
+                # (rows logged before the blend have no p_blend).
+                bl = close[close["p_blend"].notna()]
+                res.update({"logloss_blend": _logloss(bl["p_blend"], bl["over_won"]),
+                            "logloss_book_blend": _logloss(bl["p_book"], bl["over_won"]),
+                            "n_lines_blend": int(len(bl))})
             if "p_shadow" in close and close["p_shadow"].notna().any():
                 sh = close[close["p_shadow"].notna()]
                 res["shadow"] = {

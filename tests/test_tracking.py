@@ -319,3 +319,18 @@ def test_line_values_use_the_blend(monkeypatch):
     assert v["p_blend"] == pytest.approx(v["p_book"], abs=1e-6)  # all book: no edge left
     assert v["ev_over"] < 0 and v["ev_under"] < 0
     assert tracking.line_values(entry, pmf, "batter")["p_blend"] == v["p_model"]  # no weights for hitters
+
+
+def test_summary_scores_the_blend_on_its_own_rows():
+    rows = []
+    for i, (pm, pb, pbl, won) in enumerate([(0.7, 0.5, 0.55, True), (0.4, 0.5, 0.47, False),
+                                           (0.6, 0.5, None, True)]):
+        rows.append({"kind": "pitcher", "game_pk": i, "player_id": i, "line": 5.5,
+                     "fetched_at": pd.Timestamp("2026-10-06T20:00Z"), "game_date": pd.Timestamp("2026-10-06"),
+                     "is_close": True, "status": "graded", "p_model": pm, "p_book": pb, "p_blend": pbl,
+                     "over_won": won, "over": -110, "under": -110, "ev_over": 0.0, "ev_under": 0.0,
+                     "clv_over": np.nan, "close_line": np.nan, "lineup_confirmed": True})
+    res = tracking.summary(pd.DataFrame(rows))["pitcher"]
+    assert res["n_lines"] == 3 and res["n_lines_blend"] == 2
+    assert res["logloss_blend"] == pytest.approx(-(np.log(0.55) + np.log(0.53)) / 2)
+    assert res["logloss_book_blend"] == pytest.approx(np.log(2))
