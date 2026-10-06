@@ -13,7 +13,8 @@ Phones never call the API; only the publish job does, under a strict budget:
   a day, enough to price ~7 games once; a bigger plan automatically buys more games
   and more refreshes.
 * Within the allowance, games are priced only within ``WINDOW_HOURS`` of first pitch.
-  A game is re-priced at most every ``EVENT_REFRESH_HOURS``, tightening to every
+  A game is re-priced every ``EARLY_REFRESH_HOURS`` while more than ``EARLY_HOURS``
+  away, then at most every ``EVENT_REFRESH_HOURS``, tightening to every
   ``FINAL_REFRESH_MINUTES`` in the last ``FINAL_HOURS`` (when lineups post and lines
   move), plus one closing pull once inside ``CLOSE_MINUTES`` of first pitch.
 * When the allowance is short: closing pulls for games already priced come first (a
@@ -53,8 +54,10 @@ BOOKMAKER = "draftkings"
 BOOKMAKER_NAME = "DraftKings"
 MARKETS = {"pitcher_strikeouts": "pitcher", "batter_hits_runs_rbis": "batter"}
 RESERVE_CREDITS = 20  # never spend below this
-WINDOW_HOURS = 8.0  # only price games starting within this many hours
-EVENT_REFRESH_HOURS = 2.0  # re-price a game at most this often...
+WINDOW_HOURS = 24.0  # only price games starting within this many hours
+EARLY_HOURS = 8.0  # more than this far out, a game is re-priced only every
+EARLY_REFRESH_HOURS = 4.0  # this many hours;
+EVENT_REFRESH_HOURS = 2.0  # closer in, at most this often...
 FINAL_HOURS = 3.0  # ...except in its last hours before first pitch,
 FINAL_REFRESH_MINUTES = 30  # when it's re-priced this often
 CLOSE_MINUTES = 45  # one closing pull inside this many minutes of first pitch
@@ -248,7 +251,9 @@ def fetch_priority(start: pd.Timestamp, last: pd.Timestamp | None,
     if minutes <= CLOSE_MINUTES:
         closed = (start - last) / pd.Timedelta(minutes=1) <= CLOSE_MINUTES
         return None if closed else CLOSING  # at most one pull inside the closing window
-    gap = FINAL_REFRESH_MINUTES if minutes <= FINAL_HOURS * 60 else EVENT_REFRESH_HOURS * 60
+    gap = (FINAL_REFRESH_MINUTES if minutes <= FINAL_HOURS * 60
+           else EVENT_REFRESH_HOURS * 60 if minutes <= EARLY_HOURS * 60
+           else EARLY_REFRESH_HOURS * 60)
     return REFRESH if (now - last) / pd.Timedelta(minutes=1) >= gap else None
 
 

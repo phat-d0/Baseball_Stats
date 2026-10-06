@@ -75,7 +75,7 @@ START_TS = pd.Timestamp("2026-06-10T23:00:00Z")
 
 
 @pytest.mark.parametrize("minutes_before,last_before,expected", [
-    (600, None, None),                       # outside the 8 h window
+    (1500, None, None),                      # outside the 24 h window
     (300, None, odds.UNPRICED),
     (300, 360, None),                        # 1 h since last pull, 2 h gap
     (300, 430, odds.REFRESH),                # 2 h 10 m since last

@@ -71,10 +71,16 @@ function mainBook(player, line) {
   const book = player.book || [];
   return book.find((b) => b.line === line) || book[Math.floor(book.length / 2)] || null;
 }
-// "DK 5.5: O −120 / U +100" for the line shown (or the player's main DK line).
+// DraftKings' own chance for a price, margin included, as its app shows it (−156 → 61%).
+const implied = (a) => (a == null ? "–" : `${Math.round((a > 0 ? 100 / (a + 100) : -a / (-a + 100)) * 100)}%`);
+// Its own meta line: "DK 4.5: O +127 (44%) · U −156 (61%)" for the line shown (or the
+// player's main DK line).
 function bookMetaAt(player, line) {
   const b = mainBook(player, line);
-  return b ? ` · DK ${b.line}: O ${american(b.over)} / U ${american(b.under)}` : "";
+  const text = b
+    ? `DK ${b.line}: O ${american(b.over)} (${implied(b.over)}) · U ${american(b.under)} (${implied(b.under)})`
+    : "No DraftKings price yet";
+  return `</span><span class="meta book">${text}`;
 }
 function valueBadge(player) {
   const bb = bestBet(player);
@@ -363,13 +369,16 @@ function batterRow(b, line, showTeam = true) {
       <span class="meter" aria-hidden="true"><span style="width:${(p * 100).toFixed(1)}%"></span></span>
     </button>`;
 }
-function pitcherRow(p, line) {
+function pitcherRow(p, chosen) {
+  // Starters' lines differ (2.5 for an opener, 7.5 for an ace): use DraftKings' line when
+  // it has one, so the model's chance sits next to the price it's compared with.
+  const line = mainBook(p, chosen)?.line ?? chosen;
   const po = pOver(p.pmf, line);
   return `
     <button class="row-btn${edgeClass(p)}" data-player="pitcher" data-game="${p.game.game_pk}" data-id="${p.id}">
       <span class="who"><b>${esc(p.name)}</b>
-        <span class="meta">${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)} · ${handName(p.hand)}${bookMetaAt(p, null)}</span>${valueBadge(p)}</span>
-      <span class="vals"><b>${fix(p.mu)} K</b><small>over ${line}: ${pct(po)}</small></span>
+        <span class="meta">${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)} · ${handName(p.hand)}${bookMetaAt(p, line)}</span>${valueBadge(p)}</span>
+      <span class="vals"><b>${fix(p.mu)} K</b><small>model over ${line}: ${pct(po)}</small></span>
       <span class="meter" aria-hidden="true"><span style="width:${(po * 100).toFixed(1)}%"></span></span>
     </button>`;
 }

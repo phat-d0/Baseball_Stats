@@ -38,10 +38,11 @@ DraftKings line next to the model. Add a free API key as the repo secret `ODDS_A
 Props are priced per game (about 2 credits a game), under a daily budget:
 - Listing the day's games is free and reports the real credit balance.
 - Each day may spend `(credits left − 20 reserve) ÷ days until the monthly reset`.
-- A game is priced within 8 hours of first pitch: every 2 hours, then every 30 minutes in
-  the last 3 hours (when lineups post and lines move), plus one closing pull inside 45
-  minutes. When credits are short: closing pulls first, then unpriced games, then refreshes.
-- On the 20k plan that's about 7,000 credits a month in season. The optional repository
+- A game is priced from 24 hours before first pitch: every 4 hours, every 2 hours inside
+  8 hours, then every 30 minutes in the last 3 hours (when lineups post and lines move),
+  plus one closing pull inside 45 minutes. When credits are short: closing pulls first,
+  then unpriced games, then refreshes.
+- That's about 12,000 credits a month in season (the key is shared with the soccer app). The optional repository
   variable `ODDS_API_MONTHLY_CAP` limits this app's monthly spend (unset = no cap).
 
 **Pick log and grading** (`baseball_stats/tracking.py`): every DraftKings price the app

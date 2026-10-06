@@ -133,3 +133,15 @@ def test_allowance_recomputed_when_balance_jumps():
     _, status = odds.fetch_props(_games(api), now=later, api_key="k", session=api)
     assert status.daily_allowance > 500  # ~20,000 credits over the next 30 days
     assert api.paid_calls > 10  # the games left waiting were priced
+
+
+def test_fetch_priority_schedule():
+    start = pd.Timestamp("2026-10-07T01:30:00Z")
+    at = lambda h: start - pd.Timedelta(hours=h)  # noqa: E731
+    assert odds.fetch_priority(start, None, at(25)) is None  # too far out
+    assert odds.fetch_priority(start, None, at(10)) == odds.UNPRICED  # 24h window
+    assert odds.fetch_priority(start, at(13), at(10)) is None  # early: every 4 hours
+    assert odds.fetch_priority(start, at(14.5), at(10)) == odds.REFRESH
+    assert odds.fetch_priority(start, at(7), at(4.5)) == odds.REFRESH  # every 2 hours inside 8h
+    assert odds.fetch_priority(start, at(1.4), at(1)) is None  # every 30 minutes in the last 3h
+    assert odds.fetch_priority(start, at(1.6), at(1)) == odds.REFRESH
