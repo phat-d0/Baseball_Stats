@@ -548,6 +548,7 @@ function viewPitchers() {
 const MIN_PICKS = 200; // below this, results are mostly luck
 const MODEL_NAMES = {
   current: "game-level model",
+  dist: "hitter distribution model (the whole H+R+RBI distribution from one classifier)",
   pa_simple: "plate-appearance model (each hitter's strikeout chance × batters faced)",
   pa_seq: "batter-by-batter simulation",
   pa_sim: "whole-game simulation (both lineups, plate appearance by plate appearance)",
@@ -561,11 +562,17 @@ function modelNote(kind) {
 
 // The verdict that heads Record: are picks beating DraftKings? Deliberately cautious: it
 // only says "beating" when even the low end of the return range is above zero.
-function verdict(t, few) {
-  if (few) return { cls: "", head: "Too early to tell", sub: `${t.n || 0} of ${MIN_PICKS} picks graded. Results this small are mostly luck.` };
+function verdict(t, few, since) {
+  const from = since ? ` since ${shortDate(since)}` : "";
+  if (few) return { cls: "", head: "Too early to tell", sub: `${t.n || 0} of ${MIN_PICKS} picks graded${from}. Results this small are mostly luck.` };
   const clvUp = t.clv != null && t.clv > 0;
   if (clvUp && t.roi_lo > 0) return { cls: "pos-text", head: "Beating DraftKings", sub: "Positive return across the whole 90% range, and prices moved our way by first pitch." };
-  if (clvUp || t.roi > 0) return { cls: "", head: "Mixed signs", sub: `${t.roi > 0 ? "Return is positive" : "Return is negative"}, ${clvUp ? "but prices moved our way by first pitch" : "and prices didn't move our way by first pitch"}. Not proof of an edge yet.` };
+  if (clvUp || t.roi > 0) {
+    const sub = clvUp && t.roi > 0 ? "Positive return and prices moved our way by first pitch, but the 90% return range still includes a loss."
+      : t.roi > 0 ? "Return is positive, but prices didn't move our way by first pitch."
+      : "Prices moved our way by first pitch, but the return is negative so far.";
+    return { cls: "", head: "Mixed signs", sub };
+  }
   return { cls: "neg-text", head: "Not beating DraftKings", sub: "Negative return and no closing line value so far." };
 }
 
@@ -578,14 +585,17 @@ function marketCard() {
   }
   const t = k.by_threshold[String(state.minEdge)] || { n: 0 };
   const few = (t.n || 0) < MIN_PICKS;
-  const v = verdict(t, few);
+  const v = verdict(t, few, k.picks_since);
   const pts = (x) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(1)} pts`);
-  // Log loss on closing lines: the blend's when published, else the model's own, labeled so.
-  const llOurs = k.logloss_blend ?? k.logloss_model;
-  const llWho = k.logloss_blend != null ? "Our chance" : "Model alone";
-  const llRow = llOurs != null && k.logloss_book != null
-    ? `<div class="kv"><span>Accuracy vs DraftKings<small>log loss on ${k.n_lines.toLocaleString()} closing lines, lower is better</small></span>
-        <span><b class="${!few && llOurs < k.logloss_book ? "pos-text" : ""}">${llOurs.toFixed(4)}</b><small>${llWho} · DK ${k.logloss_book.toFixed(4)}</small></span></div>`
+  // Log loss on closing lines, lower is better: our blended chance (what edges use) against
+  // DraftKings on the same lines, then the model alone, kept as a secondary line.
+  const llRow = k.logloss_blend != null
+    ? `<div class="kv"><span>Blend vs DraftKings<small>log loss on ${k.n_lines_blend.toLocaleString()} closing lines, lower is better</small></span>
+        <span><b class="${!few && k.logloss_blend < k.logloss_book_blend ? "pos-text" : ""}">${k.logloss_blend.toFixed(4)}</b><small>DraftKings ${k.logloss_book_blend.toFixed(4)}</small></span></div>`
+    : `<div class="kv"><span>Blend vs DraftKings<small>log loss on closing lines, lower is better</small></span>
+        <span><b class="muted">–</b><small>no graded closing lines yet</small></span></div>`;
+  const modelAlone = k.logloss_model != null
+    ? `<p class="verdict-foot">Model alone: ${k.logloss_model.toFixed(4)} vs DraftKings ${k.logloss_book.toFixed(4)} on ${k.n_lines.toLocaleString()} closing lines.</p>`
     : "";
   const card = `
     <div class="card verdict">
@@ -593,9 +603,10 @@ function marketCard() {
       <p class="verdict-sub">${v.sub}</p>
       <div class="kv"><span>Closing line value<small>how far DK's chance moved toward our pick by first pitch</small></span>
         <span><b class="${!few && t.clv > 0 ? "pos-text" : ""}">${pts(t.clv)}</b><small>${t.clv_pos == null ? "no closing prices yet" : `${pct(t.clv_pos)} beat the close`}</small></span></div>
-      <div class="kv"><span>Return per $1<small>flat $1 on every pick at or above ${pct(state.minEdge)}</small></span>
-        <span><b class="${!few && t.roi > 0 ? "pos-text" : ""}">${signedPct(t.roi, 1)}</b><small>90% range ${signedPct(t.roi_lo, 0)} to ${signedPct(t.roi_hi, 0)}</small></span></div>
+      <div class="kv"><span>Return per $1<small>flat $1 on every pick at or above ${pct(state.minEdge)}${k.picks_since ? ` since ${shortDate(k.picks_since)}` : ""}</small></span>
+        <span><b class="${!few && t.roi_lo > 0 ? "pos-text" : ""}">${signedPct(t.roi, 1)}</b><small>${t.roi == null ? "no picks yet" : `90% range ${signedPct(t.roi_lo, 0)} to ${signedPct(t.roi_hi, 0)}`}</small></span></div>
       ${llRow}
+      ${modelAlone}
     </div>`;
   const sh = k.shadow;
   const shadowLine = sh
@@ -617,7 +628,7 @@ function marketCard() {
       <div class="card"><table><thead><tr><th>Edge</th><th>Picks</th><th>Win</th><th>Return</th><th>CLV</th></tr></thead><tbody>${edgeRows}</tbody></table></div>
       ${lineup}
       ${shadowLine}
-      <p class="note">A pick is the first DraftKings price at or above the edge, $1 flat, graded after the game. Closing line value: how far DraftKings' own chance moved toward the pick by first pitch, in percentage points; beating the close consistently is the surest sign of real value. Log loss scores every closing line, picked or not; if ours isn't lower than DraftKings', we know nothing the price doesn't.</p>
+      <p class="note">A pick is the first DraftKings price at or above the edge, $1 flat, graded after the game. Only prices logged since the blend went live${k.picks_since ? ` (${shortDate(k.picks_since)})` : ""} count; earlier edges came from the model alone. Closing line value: how far DraftKings' own chance moved toward the pick by first pitch, in percentage points; beating the close consistently is the surest sign of real value. Log loss scores every closing line, picked or not; if ours isn't lower than DraftKings', we know nothing the price doesn't.</p>
     </details>`;
 }
 
