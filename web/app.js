@@ -43,6 +43,9 @@ function fairOdds(p) {
   return a > 0 ? `+${a}` : `−${Math.abs(a)}`;
 }
 
+// Timestamps from pandas look like "2026-10-06 17:41:54+00:00"; Safari won't parse the space.
+const parseTs = (x) => (x == null ? NaN : Date.parse(String(x).replace(" ", "T")));
+
 function gameTime(iso) {
   if (!iso) return "TBD";
   const d = new Date(iso);
@@ -187,7 +190,7 @@ function valuePicks() {
     .map((p) => ({ p, bb: bestBet(p) })).filter((x) => x.bb && x.bb.ev >= state.minEdge)
     .sort((a, b) => b.bb.ev - a.bb.ev).slice(0, 12);
   const rows = picks.map(({ p, bb }) => {
-    const mins = bb.fetchedAt ? Math.round((Date.now() - Date.parse(bb.fetchedAt)) / 60000) : null;
+    const mins = bb.fetchedAt ? Math.round((Date.now() - parseTs(bb.fetchedAt)) / 60000) : null;
     const age = mins == null ? "" : ` · price ${mins < 60 ? `${mins} min` : `${(mins / 60).toFixed(1)} h`} old`;
     const where = ` · ${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))}${age}`;
     return edgeRow(p, bb, { where, stale: mins != null && mins > 90 });
@@ -545,6 +548,7 @@ function viewPitchers() {
 const MIN_PICKS = 200; // below this, results are mostly luck
 const MODEL_NAMES = {
   current: "game-level model",
+  dist: "hitter distribution model (the whole H+R+RBI distribution from one classifier)",
   pa_simple: "plate-appearance model (each hitter's strikeout chance × batters faced)",
   pa_seq: "batter-by-batter simulation",
   pa_sim: "whole-game simulation (both lineups, plate appearance by plate appearance)",
@@ -556,43 +560,76 @@ function modelNote(kind) {
   return `<p class="note">Active ${kind === "pitcher" ? "strikeout" : "H+R+RBI"} model: ${esc(MODEL_NAMES[m.name] || m.name)}${shadow}.</p>`;
 }
 
+// The verdict that heads Record: are picks beating DraftKings? Deliberately cautious: it
+// only says "beating" when even the low end of the return range is above zero.
+function verdict(t, few, since) {
+  const from = since ? ` since ${shortDate(since)}` : "";
+  if (few) return { cls: "", head: "Too early to tell", sub: `${t.n || 0} of ${MIN_PICKS} picks graded${from}. Results this small are mostly luck.` };
+  const clvUp = t.clv != null && t.clv > 0;
+  if (clvUp && t.roi_lo > 0) return { cls: "pos-text", head: "Beating DraftKings", sub: "Positive return across the whole 90% range, and prices moved our way by first pitch." };
+  if (clvUp || t.roi > 0) {
+    const sub = clvUp && t.roi > 0 ? "Positive return and prices moved our way by first pitch, but the 90% return range still includes a loss."
+      : t.roi > 0 ? "Return is positive, but prices didn't move our way by first pitch."
+      : "Prices moved our way by first pitch, but the return is negative so far.";
+    return { cls: "", head: "Mixed signs", sub };
+  }
+  return { cls: "neg-text", head: "Not beating DraftKings", sub: "Negative return and no closing line value so far." };
+}
+
 function marketCard() {
   const m = state.data?.record?.market;
   const k = m?.[state.recKind];
-  const head = `<h2 class="section-title">vs DraftKings</h2>`;
+  const head = `<h2 class="section-title">Are we beating DraftKings?</h2>`;
   if (!k || !k.by_threshold) {
     return `${head}<div class="card"><span class="muted">No graded DraftKings picks yet. Every price the app downloads is logged and graded after the game${m?.first_snapshot ? `; logging since ${shortDate(m.first_snapshot)}` : ""}.</span></div>`;
   }
   const t = k.by_threshold[String(state.minEdge)] || { n: 0 };
   const few = (t.n || 0) < MIN_PICKS;
+  const v = verdict(t, few, k.picks_since);
   const pts = (x) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(1)} pts`);
-  const tiles = `
-    <div class="tiles ${few ? "dim" : ""}">
-      <div class="tile"><div class="label">Picks graded</div><div class="value">${(t.n || 0).toLocaleString()}</div><div class="sub">${t.n_void || 0} void · ${t.n_pending || 0} pending</div></div>
-      <div class="tile"><div class="label">Return per $1</div><div class="value ${t.roi > 0 && !few ? "pos-text" : ""}">${signedPct(t.roi, 1)}</div><div class="sub">90% range ${signedPct(t.roi_lo, 0)} to ${signedPct(t.roi_hi, 0)}</div></div>
-      <div class="tile"><div class="label">Win rate</div><div class="value">${pct(t.win, 1)}</div><div class="sub">break-even ${pct(t.breakeven, 1)} · model said ${pct(t.expected, 1)}</div></div>
-      <div class="tile"><div class="label">Closing line value</div><div class="value">${pts(t.clv)}</div><div class="sub">${t.clv_pos == null ? "no closing prices yet" : `${pct(t.clv_pos)} beat the close`}</div></div>
-    </div>`;
-  const ll = k.logloss_model != null
-    ? `<p class="note">Model log loss <b class="${k.logloss_model < k.logloss_book ? "pos-text" : ""}">${k.logloss_model.toFixed(4)}</b> vs DraftKings ${k.logloss_book.toFixed(4)} on ${k.n_lines.toLocaleString()} closing lines. Lower is better; if the model isn't lower, it knows nothing the price doesn't.</p>`
+  // Log loss on closing lines, lower is better: our blended chance (what edges use) against
+  // DraftKings on the same lines, then the model alone, kept as a secondary line.
+  const llRow = k.logloss_blend != null
+    ? `<div class="kv"><span>Blend vs DraftKings<small>log loss on ${k.n_lines_blend.toLocaleString()} closing lines, lower is better</small></span>
+        <span><b class="${!few && k.logloss_blend < k.logloss_book_blend ? "pos-text" : ""}">${k.logloss_blend.toFixed(4)}</b><small>DraftKings ${k.logloss_book_blend.toFixed(4)}</small></span></div>`
+    : `<div class="kv"><span>Blend vs DraftKings<small>log loss on closing lines, lower is better</small></span>
+        <span><b class="muted">–</b><small>no graded closing lines yet</small></span></div>`;
+  const modelAlone = k.logloss_model != null
+    ? `<p class="verdict-foot">Model alone: ${k.logloss_model.toFixed(4)} vs DraftKings ${k.logloss_book.toFixed(4)} on ${k.n_lines.toLocaleString()} closing lines.</p>`
     : "";
+  const card = `
+    <div class="card verdict">
+      <div class="verdict-head ${few ? "" : v.cls}">${v.head}</div>
+      <p class="verdict-sub">${v.sub}</p>
+      <div class="kv"><span>Closing line value<small>how far DK's chance moved toward our pick by first pitch</small></span>
+        <span><b class="${!few && t.clv > 0 ? "pos-text" : ""}">${pts(t.clv)}</b><small>${t.clv_pos == null ? "no closing prices yet" : `${pct(t.clv_pos)} beat the close`}</small></span></div>
+      <div class="kv"><span>Return per $1<small>flat $1 on every pick at or above ${pct(state.minEdge)}${k.picks_since ? ` since ${shortDate(k.picks_since)}` : ""}</small></span>
+        <span><b class="${!few && t.roi_lo > 0 ? "pos-text" : ""}">${signedPct(t.roi, 1)}</b><small>${t.roi == null ? "no picks yet" : `90% range ${signedPct(t.roi_lo, 0)} to ${signedPct(t.roi_hi, 0)}`}</small></span></div>
+      ${llRow}
+      ${modelAlone}
+    </div>`;
   const sh = k.shadow;
   const shadowLine = sh
-    ? `<p class="note">Shadow (${esc(MODEL_NAMES[sh.name] || sh.name)}): log loss ${sh.logloss_shadow.toFixed(4)} vs active ${sh.logloss_model.toFixed(4)} and DraftKings ${sh.logloss_book.toFixed(4)} on the same ${sh.n_lines.toLocaleString()} closing lines.</p>`
+    ? `<p class="note">Shadow model (${esc(MODEL_NAMES[sh.name] || sh.name)}): log loss ${sh.logloss_shadow.toFixed(4)} vs active ${sh.logloss_model.toFixed(4)} and DraftKings ${sh.logloss_book.toFixed(4)} on the same ${sh.n_lines.toLocaleString()} closing lines.</p>`
     : "";
   const edgeRows = (k.by_edge || []).map((b) => `<tr><td>${pct(b.lo)}${b.hi ? `–${pct(b.hi)}` : "+"}</td><td>${b.n || 0}</td><td>${pct(b.win)}</td><td>${signedPct(b.roi, 1)}</td><td>${b.clv == null ? "–" : pts(b.clv)}</td></tr>`).join("");
   const lineup = k.by_lineup
-    ? `<p class="note">Hitters at a 2%+ edge: confirmed lineups ${signedPct(k.by_lineup.confirmed?.roi, 1)} on ${k.by_lineup.confirmed?.n || 0}, projected ${signedPct(k.by_lineup.projected?.roi, 1)} on ${k.by_lineup.projected?.n || 0}.</p>`
+    ? `<p class="note">Hitters at a 1%+ edge: confirmed lineups ${signedPct(k.by_lineup.confirmed?.roi, 1)} on ${k.by_lineup.confirmed?.n || 0}, projected ${signedPct(k.by_lineup.projected?.roi, 1)} on ${k.by_lineup.projected?.n || 0}.</p>`
     : "";
   return `${head}
     ${edgeControl()}
-    ${tiles}
-    ${few ? `<p class="note">Too few picks to judge yet (${t.n || 0} of ${MIN_PICKS}). Until then these numbers are mostly luck.</p>` : ""}
-    ${ll}
-    ${shadowLine}
-    <div class="card"><table><thead><tr><th>Edge</th><th>Picks</th><th>Win</th><th>Return</th><th>CLV</th></tr></thead><tbody>${edgeRows}</tbody></table></div>
-    ${lineup}
-    <p class="note">A pick is the first DraftKings price at or above the edge, $1 flat, graded after the game. Closing line value: how far DraftKings' own chance moved toward the pick by first pitch, in percentage points; beating the close consistently is the surest sign of real value.</p>`;
+    ${card}
+    <details class="more">
+      <summary>Picks, win rate and edge bands</summary>
+      <div class="kv-list card">
+        <div class="kv"><span>Picks graded</span><span><b>${(t.n || 0).toLocaleString()}</b><small>${t.n_void || 0} void · ${t.n_pending || 0} pending</small></span></div>
+        <div class="kv"><span>Win rate</span><span><b>${pct(t.win, 1)}</b><small>break-even ${pct(t.breakeven, 1)} · we said ${pct(t.expected, 1)}</small></span></div>
+      </div>
+      <div class="card"><table><thead><tr><th>Edge</th><th>Picks</th><th>Win</th><th>Return</th><th>CLV</th></tr></thead><tbody>${edgeRows}</tbody></table></div>
+      ${lineup}
+      ${shadowLine}
+      <p class="note">A pick is the first DraftKings price at or above the edge, $1 flat, graded after the game. Only prices logged since the blend went live${k.picks_since ? ` (${shortDate(k.picks_since)})` : ""} count; earlier edges came from the model alone. Closing line value: how far DraftKings' own chance moved toward the pick by first pitch, in percentage points; beating the close consistently is the surest sign of real value. Log loss scores every closing line, picked or not; if ours isn't lower than DraftKings', we know nothing the price doesn't.</p>
+    </details>`;
 }
 
 function viewRecord() {
@@ -610,48 +647,56 @@ function viewRecord() {
     ? `<div class="segmented">${[[null, "All lines"], ...Object.keys(byLine).map((l) => [l, `O ${l}`])]
         .map(([v, l]) => `<button data-cal-line="${v ?? ""}" class="${(v ?? null) === calKey ? "on" : ""}">${l}</button>`).join("")}</div>`
     : "";
+  const days = Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1;
   return `${toggle}
-    ${modelNote(state.recKind)}
     ${marketCard()}
-    <h2 class="section-title">Last ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days, not used in training</h2>
+    <h2 class="section-title">Model on its own · last ${days} days</h2>
+    ${modelNote(state.recKind)}
     <div class="tiles">
       <div class="tile"><div class="label">Over/under chances</div><div class="value">${llGain == null ? "–" : `${llGain >= 0 ? "+" : "−"}${Math.abs(llGain * 100).toFixed(1)}%`}</div><div class="sub">${llGain == null ? "" : llGain >= 0 ? "better than season average" : "worse than season average"}</div></div>
       <div class="tile"><div class="label">Average miss</div><div class="value">${fix(rec.mae_model, 2)}</div><div class="sub">${unit} per game · season avg ${fix(rec.mae_baseline, 2)}</div></div>
       <div class="tile"><div class="label">Daily top-10 over ${tp.line}</div><div class="value">${pct(tp.actual)}</div><div class="sub">hit · model said ${pct(tp.predicted)}</div></div>
       <div class="tile"><div class="label">${state.recKind === "batter" ? "Hitter" : "Starter"} games graded</div><div class="value">${rec.n.toLocaleString()}</div><div class="sub">${shortDate(rec.test_from)} – ${shortDate(rec.test_to)}</div></div>
     </div>
-    <h2 class="section-title">Are the chances honest?</h2>
+    <p class="note">Compared with the obvious guess, the player's own ${unit} per game this season, on games not used in training. This says the model learns something; only the section above says whether that's worth money against DraftKings.</p>
+    <h2 class="section-title">Are the model's chances honest?</h2>
     ${calSwitch}
     <div class="card">${calibrationChart(calKey ? byLine[calKey] : rec.calibration || [])}</div>
-    <p class="note">"Season average" is the player's own ${unit} per game this season, the obvious guess without a model. "Over/under chances" scores the chance of going over every line (log loss); it's what matters for betting, and it can improve even when the average miss barely moves. The model retrains every run on all finished games; this check holds out the most recent ${Math.round((Date.parse(rec.test_to) - Date.parse(rec.test_from)) / 864e5) + 1} days.</p>`;
+    <p class="note">"Over/under chances" scores the chance of going over every line (log loss); it's what matters for betting, and it can improve even when the average miss barely moves. The model retrains every run on all finished games; this check holds out the most recent ${days} days.</p>`;
 }
 
 // ---------- paper portfolio ----------
 const decimalOdds = (a) => (a > 0 ? 1 + a / 100 : 1 + 100 / Math.abs(a));
 const money = (x, d = 2) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}$${Math.abs(x).toFixed(d)}`);
 
+// Cumulative profit by day, starting from $0 the day before the first settled day, so a
+// single settled day still draws a line. The $0 line is labeled; the last point carries
+// the running total.
 function profitChart(curve) {
-  if (!curve || curve.length < 2) return "";
-  const W = 320, H = 170, L = 40, R = 8, T = 10, B = 22;
-  const ys = curve.map((c) => c.cum);
+  if (!curve?.length) return "";
+  const pts = [{ date: null, cum: 0 }, ...curve];
+  const W = 320, H = 170, L = 44, R = 50, T = 12, B = 22;
+  const ys = pts.map((c) => c.cum);
   const lo = Math.min(0, ...ys), hi = Math.max(0, ...ys);
   const span = hi - lo || 1;
-  const sx = (i) => L + (i / (curve.length - 1)) * (W - L - R);
+  const sx = (i) => L + (i / (pts.length - 1)) * (W - L - R);
   const sy = (v) => T + (1 - (v - lo) / span) * (H - T - B);
-  const ticks = [lo, (lo + hi) / 2, hi];
+  const ticks = [lo, hi].filter((v) => Math.abs(v) > span * 0.12);
   const grid = ticks.map((v) => `<line x1="${L}" x2="${W - R}" y1="${sy(v)}" y2="${sy(v)}"/><text x="${L - 4}" y="${sy(v) + 3}" text-anchor="end">${money(v, 0)}</text>`).join("");
-  const path = curve.map((c, i) => `${i ? "L" : "M"}${sx(i)},${sy(c.cum)}`).join(" ");
-  const hits = curve.map((c, i) => `<circle class="hit" cx="${sx(i)}" cy="${sy(c.cum)}" r="12" fill="transparent" data-tip="${esc(`${shortDate(c.date)}: ${money(c.profit)} · total ${money(c.cum)}`)}" data-x="${(sx(i) / W) * 100}"/>`).join("");
-  const last = curve.length - 1;
+  const path = pts.map((c, i) => `${i ? "L" : "M"}${sx(i)},${sy(c.cum)}`).join(" ");
+  const hits = curve.map((c, i) => `<circle class="hit" cx="${sx(i + 1)}" cy="${sy(c.cum)}" r="12" fill="transparent" data-tip="${esc(`${shortDate(c.date)}: ${money(c.profit)} · total ${money(c.cum)}`)}" data-x="${(sx(i + 1) / W) * 100}"/>`).join("");
+  const last = pts.length - 1, end = pts[last].cum;
   return `
-    <div class="chart">
-      <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cumulative paper profit by day">
+    <div class="chart profit">
+      <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cumulative paper profit by day: ${money(end)} so far">
         <g class="grid">${grid}</g>
         <line class="zero" x1="${L}" x2="${W - R}" y1="${sy(0)}" y2="${sy(0)}"/>
-        <path class="line" d="${path}"/>
-        <circle class="dot" cx="${sx(last)}" cy="${sy(curve[last].cum)}" r="4"/>
-        <text class="xlab" x="${L}" y="${H - 6}">${shortDate(curve[0].date)}</text>
-        <text class="xlab" x="${W - R}" y="${H - 6}" text-anchor="end">${shortDate(curve[last].date)}</text>
+        <text class="xlab" x="${L - 4}" y="${sy(0) + 3}" text-anchor="end">$0</text>
+        <path class="line ${end < 0 ? "neg" : ""}" d="${path}"/>
+        <circle class="dot ${end < 0 ? "neg" : ""}" cx="${sx(last)}" cy="${sy(end)}" r="4"/>
+        <text class="end ${end > 0 ? "pos" : end < 0 ? "neg" : ""}" x="${sx(last) + 8}" y="${sy(end) + 4}">${money(end, 0)}</text>
+        <text class="xlab" x="${L}" y="${H - 6}">start</text>
+        <text class="xlab" x="${sx(last)}" y="${H - 6}" text-anchor="end">${shortDate(curve[curve.length - 1].date)}</text>
         ${hits}
       </svg>
       <div class="tooltip" hidden></div>
@@ -659,57 +704,80 @@ function profitChart(curve) {
 }
 
 function tradeRow(t) {
-  const what = `${t.side === "over" ? "Over" : "Under"} ${t.line} ${t.kind === "pitcher" ? "K" : "H+R+RBI"}`;
-  const placed = new Date(t.fetched_at);
+  const what = `${sideName(t.side)} ${t.line} ${unitName(t.kind)}`;
+  const placed = new Date(parseTs(t.fetched_at));
   const when = `${placed.toLocaleDateString([], { month: "short", day: "numeric" })} ${placed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+  const starts = parseTs(t.game_start);
   const right = t.result === "open"
     ? `<b>$${t.stake.toFixed(0)}</b><small>to win $${(t.stake * (decimalOdds(t.price) - 1)).toFixed(2)}</small>`
     : `<b class="${t.result === "won" ? "pos-text" : t.result === "lost" ? "neg-text" : ""}">${t.result === "void" ? "void" : money(t.profit)}</b><small>${t.result === "void" ? "refunded" : t.result}${t.actual != null ? ` · actual ${t.actual}` : ""}</small>`;
+  const timing = t.result === "open" && !Number.isNaN(starts) ? `First pitch ${gameTime(new Date(starts).toISOString())}` : `Placed ${when}`;
   return `
     <div class="row-btn">
       <span class="who"><b>${esc(t.player_name || "")}</b>
         <span class="meta">${what} · ${american(t.price)} · edge ${edgeText(t.ev)}</span>
-        <span class="meta">Placed ${when}${t.clv != null ? ` · CLV ${t.clv >= 0 ? "+" : "−"}${Math.abs(t.clv * 100).toFixed(1)} pts` : ""}</span></span>
+        <span class="meta">${timing}${t.clv != null ? ` · CLV ${t.clv >= 0 ? "+" : "−"}${Math.abs(t.clv * 100).toFixed(1)} pts` : ""}</span></span>
       <span class="vals">${right}</span>
     </div>`;
 }
 
 const edgeRange = (pp) => (pp?.ceiling ? `${pct(pp.threshold)}–${pct(pp.ceiling)}` : `${pct(pp?.threshold ?? 0.12)}+`);
+const shortLabel = (x) => String(x.label || x.key).replace(/\s*\(retired\)\s*$/i, "");
+const settledN = (s) => (s?.won || 0) + (s?.lost || 0);
+
+// One row per strategy, live first: name and status on the left, settled profit and
+// record on the right. Tapping a row shows that strategy below.
+function strategyList(all, pp) {
+  const rows = [...all].sort((a, b) => (b.source === "blend") - (a.source === "blend")).map((x) => {
+    const s = x.summary || {};
+    const live = x.source !== "model";
+    const status = live
+      ? `Live${s.first_trade ? ` since ${shortDate(String(s.first_trade).slice(0, 10))}` : ""}`
+      : "Retired · keeps its record";
+    const n = settledN(s);
+    const right = n
+      ? `<b class="${s.profit > 0 ? "pos-text" : s.profit < 0 ? "neg-text" : ""}">${money(s.profit)}</b><small>${s.won}–${s.lost} · ${signedPct(s.roi, 1)}</small>`
+      : `<b class="muted">–</b><small>${s.open ? `${s.open} open` : "no trades"}</small>`;
+    return `
+      <button class="row-btn strat${x === pp ? " on" : ""}${live ? "" : " retired"}" data-strategy="${esc(x.key)}" aria-pressed="${x === pp}">
+        <span class="who"><b>${esc(shortLabel(x))}</b><span class="meta">${status} · ${edgeRange(x)} edge</span></span>
+        <span class="vals">${right}</span>
+      </button>`;
+  }).join("");
+  return `<div class="card list">${rows}</div>`;
+}
 
 function viewPortfolio() {
   const all = strategies();
   const pp = all.find((x) => x.key === state.strategy) || all.find((x) => x.source === "blend") || all[0];
-  const toggle = all.length > 1
-    ? `<div class="segmented">${all.map((x) => `<button data-strategy="${esc(x.key)}" class="${x === pp ? "on" : ""}">${esc(x.label)}</button>`).join("")}</div>`
-    : "";
-  const compare = all.length > 1
-    ? `<div class="card"><table><thead><tr><th>Strategy</th><th>Trades</th><th>Record</th><th>Profit</th><th>Return</th></tr></thead><tbody>${all.map((x) => {
-        const s = x.summary || {};
-        return `<tr><td>${esc(x.label)}</td><td>${s.n || 0}</td><td>${s.n ? `${s.won}–${s.lost}` : "–"}</td><td class="${s.profit > 0 ? "pos-text" : s.profit < 0 ? "neg-text" : ""}">${s.n ? money(s.profit) : "–"}</td><td>${s.n ? signedPct(s.roi, 1) : "–"}</td></tr>`;
-      }).join("")}</tbody></table></div>`
-    : "";
-  const band = pp?.ceiling ? `, as long as that edge is below ${pct(pp.ceiling)}` : "";
   const basis = pp?.source === "model" ? "the model's own chance (retired Oct 6, 2026; it keeps its record but takes no new trades)" : "our blended chance";
+  const band = pp?.ceiling ? `, as long as that edge is below ${pct(pp.ceiling)}` : "";
   const rules = `<p class="note">Paper trading: $${pp?.stake ?? 10} on every DraftKings price whose edge, using ${basis}, is at least ${pct(pp?.threshold ?? 0.12)}, at the first price that clears it${band} (one trade per player and prop per game). Hitters from projected lineups are skipped. Trades are recorded automatically every run and settled from the box score; void = refunded.${all.length > 1 ? " The strategies run side by side on the same prices." : ""}</p>`;
-  const head = `<h2 class="section-title">Paper Portfolio</h2>${toggle}${compare}`;
+  const head = `<h2 class="section-title">Paper strategies</h2>${all.length > 1 ? strategyList(all, pp) : ""}`;
   if (!pp || !pp.summary?.n) {
     return `${head}<div class="empty">No paper trades yet.<br><span class="muted">One is recorded the first time a DraftKings price shows an edge of ${edgeRange(pp)}.</span></div>${rules}`;
   }
   const s = pp.summary;
+  const n = settledN(s);
   const open = pp.trades.filter((t) => t.result === "open");
   const settled = pp.trades.filter((t) => t.result !== "open");
-  return `
-    ${head}
+  const settledProfit = settled.reduce((a, t) => a + (t.profit || 0), 0);
+  const tiles = `
     <div class="tiles">
-      <div class="tile"><div class="label">Profit</div><div class="value ${s.profit > 0 ? "pos-text" : s.profit < 0 ? "neg-text" : ""}">${money(s.profit)}</div><div class="sub">on $${s.staked.toFixed(0)} settled</div></div>
-      <div class="tile"><div class="label">Return</div><div class="value">${signedPct(s.roi, 1)}</div><div class="sub">avg edge ${pct(s.avg_edge, 0)} at placement</div></div>
+      <div class="tile"><div class="label">Profit, settled</div><div class="value ${n && s.profit > 0 ? "pos-text" : n && s.profit < 0 ? "neg-text" : ""}">${n ? money(s.profit) : "–"}</div><div class="sub">${n ? `on $${s.staked.toFixed(0)} staked · ${signedPct(s.roi, 1)}` : "nothing settled yet"}</div></div>
       <div class="tile"><div class="label">Record</div><div class="value">${s.won}–${s.lost}</div><div class="sub">${s.void} void${s.clv != null ? ` · CLV ${s.clv >= 0 ? "+" : "−"}${Math.abs(s.clv).toFixed(1)} pts` : ""}</div></div>
       <div class="tile"><div class="label">Open</div><div class="value">${s.open}</div><div class="sub">$${s.at_risk.toFixed(0)} at risk</div></div>
-    </div>
-    ${pp.curve?.length > 1 ? `<h2 class="section-title">Profit over time</h2><div class="card">${profitChart(pp.curve)}</div>` : ""}
-    ${open.length ? `<h2 class="section-title">Open · ${open.length}</h2><div class="card list">${open.map(tradeRow).join("")}</div>` : ""}
-    ${settled.length ? `<h2 class="section-title">Settled · ${settled.length}</h2><div class="card list">${settled.slice(0, 100).map(tradeRow).join("")}</div>` : ""}
-    ${s.won + s.lost < 200 ? `<p class="note">Only ${s.won + s.lost} settled so far; until a few hundred, results are mostly luck.</p>` : ""}
+      <div class="tile"><div class="label">Avg edge</div><div class="value">${edgeText(s.avg_edge)}</div><div class="sub">when placed</div></div>
+    </div>`;
+  return `
+    ${head}
+    <h2 class="section-title">${esc(shortLabel(pp))}</h2>
+    ${tiles}
+    ${n < 200 ? `<p class="note">${n ? `Only ${n} settled so far` : "Nothing settled yet"}; until a few hundred, results are mostly luck.</p>` : ""}
+    ${pp.curve?.length ? `<h2 class="section-title">Profit over time</h2><div class="card">${profitChart(pp.curve)}</div>` : ""}
+    <h2 class="section-title">Open · ${open.length}${open.length ? ` · $${s.at_risk.toFixed(0)} at risk` : ""}</h2>
+    ${open.length ? `<div class="card list">${open.map(tradeRow).join("")}</div>` : `<div class="card"><span class="muted">No open trades.</span></div>`}
+    ${settled.length ? `<h2 class="section-title">Settled · ${settled.length} · <span class="${settledProfit > 0 ? "pos-text" : settledProfit < 0 ? "neg-text" : ""}">${money(settledProfit)}</span></h2><div class="card list">${settled.slice(0, 100).map(tradeRow).join("")}</div>` : ""}
     ${rules}`;
 }
 

@@ -418,3 +418,50 @@ table.book th { padding: 4px; }
 table.book tr.edge-on td { background: var(--good-bg); }
 table.book tr.edge-on td:first-child { box-shadow: inset 3px 0 0 var(--good); padding-left: 6px; }
 table.book .pill { margin-left: 4px; }
+
+/* Record: the verdict card, then label/value rows */
+.verdict { padding-top: 12px; padding-bottom: 4px; }
+.verdict-head { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+.verdict-sub { margin: 2px 0 6px; font-size: 13px; color: var(--text-secondary); }
+.kv { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-top: 0.5px solid var(--border); }
+.kv > span:first-child { min-width: 0; font-size: 14px; }
+.kv > span:last-child { text-align: right; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.kv small { display: block; font-size: 12px; color: var(--text-muted); }
+.kv b { font-size: 20px; font-weight: 600; }
+.kv-list { padding-top: 0; padding-bottom: 0; }
+.kv-list .kv:first-child { border-top: 0; }
+details.more { margin-top: 10px; }
+details.more > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: var(--shadow);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--accent);
+  margin-bottom: 10px;
+}
+details.more > summary::-webkit-details-marker { display: none; }
+details.more > summary::after { content: "Show"; float: right; color: var(--text-muted); font-weight: 400; }
+details.more[open] > summary::after { content: "Hide"; }
+
+/* Portfolio: strategy list (tap to show one), profit chart */
+.list .row-btn.strat.on {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+  margin: 0 -14px;
+  width: calc(100% + 28px);
+  padding-left: 14px;
+  padding-right: 14px;
+  box-shadow: inset 4px 0 0 var(--accent);
+  border-top-color: transparent;
+}
+.list .row-btn.strat.on + .row-btn { border-top-color: transparent; }
+.row-btn.strat.retired:not(.on) .who b { color: var(--text-secondary); font-weight: 500; }
+.chart .line.neg { stroke: var(--neg); }
+.chart .dot.neg { fill: var(--neg); }
+.chart .end { font-size: 12px; font-weight: 600; fill: var(--text-primary); }
+.chart .end.pos { fill: var(--good-text); }
+.chart .end.neg { fill: var(--neg); }
+.verdict-foot { margin: 0; padding: 8px 0 10px; border-top: 0.5px solid var(--border); font-size: 12px; color: var(--text-muted); }
