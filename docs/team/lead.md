@@ -27,7 +27,8 @@ The session that coordinates the team. It works on the default branch
 
 | Role | Session | Branch |
 |---|---|---|
-| Edge | (filled in at start) | `team/edge` |
-| Strikeouts | (filled in at start) | `team/strikeouts` |
-| Hitters | (filled in at start) | `team/hitters` |
-| UI Design | (filled in at start) | `team/ui` |
+| Lead | `session_01KJq9DXdy6f5BygSys7RpVc` | `claude/stoic-davinci-v4p6k9` |
+| Edge | `session_01CfMzWx5KSxECoT7kRa9292` | `team/edge` |
+| Strikeouts | `session_01CWbLsGVwBUJmyqW4hV4su2` | `team/strikeouts` |
+| Hitters | `session_011LnD1SKBMiJZonm2Srk2sH` | `team/hitters` |
+| UI Design | `session_015vKbR4Xd31AW4cDA14bXax` | `team/ui` |

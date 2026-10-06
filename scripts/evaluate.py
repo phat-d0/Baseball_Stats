@@ -143,6 +143,14 @@ def components_variant(**params):
     return _pmf_variant(predict)
 
 
+def dist_variant():
+    """Hitters: the whole distribution from a multiclass model (model.DistModel)."""
+    def fn(f: Fold):
+        m = model.DistModel("batter").fit(f.train)
+        return m.distribution(f.test)
+    return fn
+
+
 def baseline_variant(kind: str):
     return _pmf_variant(lambda f: (model.baseline(f.test, kind), model.baseline(f.calib, kind)))
 
@@ -216,7 +224,7 @@ def variants_for(kind: str, names: list[str] | None = None) -> dict:
     allv = {
         "batter": {"season_avg": baseline_variant("batter"), "current": gbm_variant("batter"),
                    "components": components_variant(**model.PARAMS["batter"]),
-                   "pa_sim": pa_sim_variant()},
+                   "pa_sim": pa_sim_variant(), "dist": dist_variant()},
         "pitcher": {"season_avg": baseline_variant("pitcher"), "current": gbm_variant("pitcher"),
                     "pa_simple": pa_simple_variant(), "pa_seq": pa_seq_variant()},
     }[kind]
