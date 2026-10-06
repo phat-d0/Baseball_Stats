@@ -44,12 +44,14 @@ regular season ended Sep 28). The team setup is in `CLAUDE.md` → Team and `doc
 
 ## Next steps (in order)
 
-0. **In flight (team round 2):**
-   - Edge: merge PR #3, check that the hitter blend weights reproduce, then a new PR: log
-     whether the opposing lineup was confirmed on strikeout rows, take strikeout paper
-     trades only once it is, and add a data.json field for the UI.
-   - UI: PR #5 (Record "Are we beating DraftKings?" verdict, Portfolio), wired to
-     `logloss_blend` and `picks_since`.
+0. **Team round 2: done (Oct 6).** Merged:
+   - #3 Edge: 6-hour price tooling, one-command refit (`scripts/refit_blend.sh`);
+   - #5 UI: Record opens with "Are we beating DraftKings?", Portfolio redesign;
+   - #6 Edge: strikeout paper trades only once the opposing lineup is posted, logged
+     as `opp_lineup_confirmed`;
+   - #7 UI: "lineup not posted" tag on strikeout edges.
+
+   Strikeouts and Hitters are idle until there is a new idea or new data.
 1. **Watch the blend live.**
    - Record → vs DraftKings and the Blended 1%+ paper strategy accumulate from Oct 6.
    - Expect few edges in the postseason (2–4 games a day).
