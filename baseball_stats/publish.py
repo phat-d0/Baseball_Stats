@@ -288,7 +288,7 @@ def publish(out: str | Path, *, history_start: date | None = None,
     # Grade the full log (including prices logged just now) and build the paper portfolio.
     grades = tracking.update_grades()
     market = tracking.summary(grades)
-    paper = tracking.paper_portfolio(grades)
+    paper = tracking.paper_portfolio(grades, names=names)
     if not grades.empty:
         log.info("price log grades: %s; paper trades: %s", grades["status"].value_counts().to_dict(),
                  {k: paper["summary"].get(k) for k in ("n", "open", "won", "lost", "profit")})

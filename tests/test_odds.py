@@ -121,3 +121,15 @@ def test_props_matched_to_players():
          "fetched_at": NOW.isoformat(timespec="seconds")}]
     assert props[(100, 8, "batter")][0]["over"] == 105
     assert odds.no_vig_over(-120, 100) == pytest.approx((1 / (1 + 100 / 120)) / (1 / (1 + 100 / 120) + 0.5))
+
+
+def test_allowance_recomputed_when_balance_jumps():
+    """A plan upgrade mid-day must not leave today's allowance at the old, small value."""
+    api = FakeOddsAPI(n_games=12, credits=60)
+    odds.fetch_props(_games(api), now=NOW, api_key="k", session=api)
+    assert odds.Ledger.load().allowance == 20
+    api.credits = 20000  # new key / bigger plan, same day
+    later = NOW + timedelta(minutes=30)
+    _, status = odds.fetch_props(_games(api), now=later, api_key="k", session=api)
+    assert status.daily_allowance > 500  # ~20,000 credits over the next 30 days
+    assert api.paid_calls > 10  # the games left waiting were priced

@@ -412,10 +412,13 @@ def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
 
 
 def paper_portfolio(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
-                    threshold: float = PAPER_EDGE) -> dict:
+                    threshold: float = PAPER_EDGE, names: dict | None = None) -> dict:
     """``paper`` in data.json: the paper trades, their totals and daily profit."""
     t = paper_trades(grades, stake=stake, threshold=threshold)
     base = {"stake": stake, "threshold": threshold}
+    if names and not t.empty:  # probable pitchers are logged without a name
+        missing = t["player_name"].isna() | (t["player_name"].astype(str).str.strip() == "")
+        t.loc[missing, "player_name"] = t.loc[missing, "player_id"].map(names)
     if t.empty:
         return {**base, "trades": [], "summary": {"n": 0}}
     settled = t[t["result"].isin(["won", "lost"])]

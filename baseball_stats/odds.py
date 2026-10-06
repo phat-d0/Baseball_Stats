@@ -298,6 +298,10 @@ def fetch_props(games: pd.DataFrame, *, now: datetime, api_key: str | None = Non
         if ledger.credits_left is not None and left > ledger.credits_left + 5:
             reset_day = now.day  # the balance went up: the allowance just reset
             ledger.reset_day = reset_day
+            # Recompute today's allowance from the new balance now (e.g. after a plan
+            # upgrade) instead of keeping the one fixed at the day's first run.
+            ledger.day = None
+            ledger.period_start = None
         ledger.credits_left = left
 
     pstart = period_start(now, reset_day).isoformat()
