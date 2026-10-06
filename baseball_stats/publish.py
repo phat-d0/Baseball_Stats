@@ -220,6 +220,8 @@ def _pitcher_json(row: pd.Series, mu: float, pmf: np.ndarray, names: dict) -> di
         "id": int(row["player_id"]),
         "name": row.get("player_name") or names.get(int(row["player_id"]), "TBD"),
         "hand": row.get("pitch_hand"),
+        "opp_lineup_confirmed": bool(row.get("opp_lineup_confirmed", True))
+        if pd.notna(row.get("opp_lineup_confirmed", True)) else True,
         "mu": mu,
         "pmf": pmf,
         "stats": {

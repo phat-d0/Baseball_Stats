@@ -101,6 +101,16 @@ def test_slate(fake, monkeypatch):
     assert row["starts_car"] == last["starts_car"] + 1
 
 
+def test_starters_know_if_the_lineup_they_face_is_posted():
+    games = pd.DataFrame([{"game_pk": 1, "home_team_id": 10, "away_team_id": 20,
+                           "home_probable_id": 100, "away_probable_id": 200}])
+    posted = pd.DataFrame([{"game_pk": 1, "team_id": 20, "is_home": False, "player_id": 21,
+                            "player_name": "A", "batting_order": 1, "position": "CF"}])
+    _, pit = slate.pending_rows(games, posted)
+    conf = dict(zip(pit["player_id"], pit["opp_lineup_confirmed"]))
+    assert conf == {100: True, 200: False}  # the home starter faces the posted away lineup
+
+
 def _fake_pitches(fake) -> pd.DataFrame:
     rng = np.random.default_rng(0)
     rows = []
