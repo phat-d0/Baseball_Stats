@@ -54,10 +54,10 @@ def apply(g: pd.DataFrame, w: dict) -> pd.DataFrame:
     return g
 
 
-def load(folder: str) -> pd.DataFrame:
+def load(folder: str, batter: str = "current") -> pd.DataFrame:
     snaps = backtest.load_prices(Path(folder))
     months = sorted({s["day"][:7] for s in snaps})
-    pred, inputs = backtest.predictions(months, 10_000)
+    pred, inputs = backtest.predictions(months, 10_000, batter)
     names = inputs["players"].set_index("player_id")["full_name"]
     roster = pred[["game_pk", "player_id", "kind"]].assign(name=pred["player_id"].map(names)).dropna()
     g = backtest.grades(backtest.price_rows(snaps, inputs["games"], roster), pred)
@@ -82,9 +82,10 @@ def main(argv=None) -> int:
     ap.add_argument("--test", required=True, help="folder of later historical prices to test on")
     ap.add_argument("--weights", default=None, help="write the fitted weights here")
     ap.add_argument("--report", default=None)
+    ap.add_argument("--batter", default="current", help="hitter model (an evaluate.py variant)")
     args = ap.parse_args(argv)
 
-    g_fit, g_test = load(args.fit), load(args.test)
+    g_fit, g_test = load(args.fit, args.batter), load(args.test, args.batter)
     report: dict = {"fit": {}, "by_month": {}, "test": {}}
     weights = {}
     for kind in ("batter", "pitcher"):

@@ -112,3 +112,37 @@ def test_publish_with_draftkings(fake, tmp_path, monkeypatch):
     assert hitter["book"][0]["over"] == 150
     assert data["odds_source"]["events_priced"] == 1 and data["odds_source"]["spent_today"] == 2
     assert g["pitchers"]["away"]["book"] is None
+
+
+def test_dist_model_gives_a_distribution():
+    import pandas as pd
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0, 1, 4000)
+    df = pd.DataFrame({"x": x, "is_starter": True,
+                       "target_hrr": rng.poisson(0.5 + 2 * x)})
+    m = model.DistModel("batter").fit(df)
+    mu, dist = m.distribution(df.iloc[:5])
+    assert dist.shape == (5, model.MAX_COUNT["batter"] + 1)
+    assert dist.sum(axis=1) == pytest.approx(np.ones(5))
+    assert mu == pytest.approx(dist @ np.arange(dist.shape[1]))
+    lo, hi = m.predict(pd.DataFrame({"x": [0.05, 0.95]}))
+    assert hi > lo + 1
+
+
+def test_publish_with_dist_hitters(fake, tmp_path, monkeypatch):
+    """BASEBALL_MODEL_BATTER=dist switches hitters to model.DistModel; 'current' can shadow it."""
+    from baseball_stats import odds
+    monkeypatch.setenv("ODDS_API_KEY", "k")
+    monkeypatch.setenv("ODDS_API_RESET_DAY", "1")
+    monkeypatch.setenv("BASEBALL_MODEL_BATTER", "dist")
+    monkeypatch.setenv("BASEBALL_SHADOW_BATTER", "current")
+    monkeypatch.setattr(odds.requests, "get", FakeDK().get)
+    data = publish.publish(tmp_path / "site", history_start=START,
+                           now=datetime(2025, 6, 15, 16, 0, tzinfo=UTC))
+    assert data["record"]["batter"]["model_name"] == "dist"
+    hitter = next(x for x in data["slates"][0]["games"][0]["lineups"]["home"] if x["id"] == 10101)
+    assert sum(hitter["pmf"]) == pytest.approx(1, abs=1e-3)
+    log = storage.read("prop_snapshots")
+    row = log[log["kind"] == "batter"].iloc[0]
+    assert row["model_name"] == "dist" and row["shadow_name"] == "current"
+    assert 0 < row["p_shadow"] < 1
