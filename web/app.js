@@ -131,9 +131,14 @@ function tradePill(trade) {
   const res = trade.result === "open" ? "open" : trade.result;
   return `<span class="pill trade" title="${esc(trade.strategy || "")}">Paper $${trade.stake} · ${res}</span>`;
 }
+// Strikeout props depend on who's in the other lineup. `opp_lineup_confirmed` is true or
+// false once the backend knows; missing means unknown, so no tag either way.
+const kLineupTag = (p) => (p.kind === "pitcher" && p.opp_lineup_confirmed === false ? '<span class="tag">lineup not posted</span>' : "");
+const anyKLineupInfo = () => allPitchers().some((p) => p.opp_lineup_confirmed != null);
+
 function edgeRow(r, bb, { where = "", stale = false } = {}) {
   const trade = paperTrade(r.game.game_pk, r.id, r.kind);
-  const proj = r.kind === "batter" && r.confirmed === false ? '<span class="tag">proj</span>' : "";
+  const proj = r.kind === "batter" && r.confirmed === false ? '<span class="tag">proj</span>' : kLineupTag(r);
   return `
     <button class="row-btn edge-row${stale ? " stale" : ""}" data-player="${r.kind}" data-game="${r.game.game_pk}" data-id="${r.id}">
       <span class="who"><b>${esc(r.name)}</b>${proj}${tradePill(trade)}
@@ -159,7 +164,7 @@ function gameEdges(g) {
   return `<h3 class="section-title">Edges in this game · ${edges.length}</h3>
     ${edgeControl()}
     <div class="card list">${list}</div>
-    <p class="note">Every DraftKings price in this game at or above your minimum edge. DraftKings % is its own chance with its margin, as its app shows it; our chance blends that price with the model. Highlighted rows below are the same players. "proj" = lineup not posted yet (left out of Value picks and paper trades).</p>`;
+    <p class="note">Every DraftKings price in this game at or above your minimum edge. DraftKings % is its own chance with its margin, as its app shows it; our chance blends that price with the model. Highlighted rows below are the same players. "proj" = lineup not posted yet (left out of Value picks and paper trades).${anyKLineupInfo() ? ` "Lineup not posted" on a strikeout prop = the other team's lineup isn't out; paper trades wait for it.` : ""}</p>`;
 }
 
 function oddsNote() {
@@ -198,7 +203,7 @@ function valuePicks() {
   return `<h2 class="section-title">Value picks · DraftKings</h2>
     ${edgeControl()}
     ${picks.length ? `<div class="card list">${rows}</div>` : `<div class="card"><span class="muted">Nothing above a ${pct(state.minEdge)} edge right now.</span></div>`}
-    <p class="note">Edge = how much a $1 bet is expected to return above your stake at DraftKings' price, using our chance: a blend of DraftKings' own chance and the model's (on past prices DraftKings is the more accurate of the two, so the blend leans on it). Expect few edges, mostly small; check Record → vs DraftKings before trusting them. Greyed = price over 90 minutes old. Hitters from projected lineups are left out until their lineup posts.</p>
+    <p class="note">Edge = how much a $1 bet is expected to return above your stake at DraftKings' price, using our chance: a blend of DraftKings' own chance and the model's (on past prices DraftKings is the more accurate of the two, so the blend leans on it). Expect few edges, mostly small; check Record → vs DraftKings before trusting them. Greyed = price over 90 minutes old. Hitters from projected lineups are left out until their lineup posts.${anyKLineupInfo() ? ` "Lineup not posted" on a strikeout prop: the other team's lineup isn't out yet, so the edge may move; paper trades take strikeout prices only once it posts.` : ""}</p>
     ${oddsNote()}`;
 }
 // One row per bet, as DraftKings lists them: price and implied %, our chance, the edge, and
@@ -413,7 +418,7 @@ function pitcherRow(p, chosen) {
   return `
     <button class="row-btn${edgeClass(p)}" data-player="pitcher" data-game="${p.game.game_pk}" data-id="${p.id}">
       <span class="who"><b>${esc(p.name)}</b>
-        <span class="meta">${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)} · ${handName(p.hand)}${bookMetaAt(p, line)}</span>${valueBadge(p)}</span>
+        <span class="meta">${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)} · ${handName(p.hand)}${bookMetaAt(p, line)}</span>${valueBadge(p)}${kLineupTag({ ...p, kind: "pitcher" })}</span>
       <span class="vals"><b>${fix(p.mu)} K</b><small>model over ${line}: ${pct(po)}</small></span>
       <span class="meter" aria-hidden="true"><span style="width:${(po * 100).toFixed(1)}%"></span></span>
     </button>`;
