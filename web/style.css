@@ -383,3 +383,16 @@ td.edge-pos { color: var(--good-text); font-weight: 600; }
 
 .dim, .row-btn.stale { opacity: 0.5; }
 .neg-text { color: var(--neg); }
+
+/* players with a DraftKings edge: highlighted wherever they're listed */
+.list .row-btn.has-edge {
+  background: var(--good-bg);
+  margin: 0 -14px;
+  padding-left: 14px;
+  padding-right: 14px;
+  box-shadow: inset 4px 0 0 var(--good);
+  border-top-color: transparent;
+}
+.list .row-btn.has-edge + .row-btn { border-top-color: transparent; }
+.pill.trade { background: var(--accent); color: #fff; margin-left: 6px; vertical-align: 1px; }
+.pill { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; }

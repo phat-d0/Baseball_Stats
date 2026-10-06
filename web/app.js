@@ -80,6 +80,48 @@ function valueBadge(player) {
   if (!bb || bb.ev < state.minEdge) return "";
   return `<span class="badge">${CHECK}${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${american(bb.price)} · ${signedPct(bb.ev)}</span>`;
 }
+// A player has an edge when his best DraftKings side clears the chosen minimum edge.
+const hasEdge = (player) => { const bb = bestBet(player); return !!bb && bb.ev >= state.minEdge; };
+const edgeClass = (player) => (hasEdge(player) ? " has-edge" : "");
+
+// The paper trade recorded for this player's prop in this game, if any.
+function paperTrade(gamePk, playerId, kind) {
+  return (state.data?.paper?.trades || []).find(
+    (t) => t.game_pk === gamePk && t.player_id === playerId && t.kind === kind);
+}
+
+function gameEdges(g) {
+  const rows = [];
+  for (const side of ["away", "home"]) {
+    const opp = side === "home" ? "away" : "home";
+    const p = g.pitchers[side];
+    if (p) rows.push({ ...p, kind: "pitcher", game: g, side, team: g[side], opp: g[opp] });
+    for (const b of g.lineups[side]) rows.push({ ...b, kind: "batter", game: g, side, team: g[side], opp: g[opp], oppSp: g.pitchers[opp] });
+  }
+  const priced = rows.some((r) => r.book?.length);
+  const edges = rows.map((r) => ({ r, bb: bestBet(r) })).filter((x) => x.bb && x.bb.ev >= state.minEdge)
+    .sort((a, b) => b.bb.ev - a.bb.ev);
+  if (!priced) return `<h3 class="section-title">Edges in this game</h3><div class="card"><span class="muted">No DraftKings prices for this game yet.</span></div>`;
+  if (!edges.length) return `<h3 class="section-title">Edges in this game</h3>${edgeControl()}<div class="card"><span class="muted">No DraftKings price clears a ${pct(state.minEdge)} edge in this game.</span></div>`;
+  const list = edges.map(({ r, bb }) => {
+    const trade = paperTrade(g.game_pk, r.id, r.kind);
+    const tags = [
+      trade ? `<span class="pill trade">Paper trade $${trade.stake}${trade.result !== "open" ? ` · ${trade.result}` : ""}</span>` : "",
+      r.kind === "batter" && r.confirmed === false ? '<span class="tag">proj</span>' : "",
+    ].join("");
+    return `
+    <button class="row-btn has-edge" data-player="${r.kind}" data-game="${g.game_pk}" data-id="${r.id}">
+      <span class="who"><b>${esc(r.name)}</b>${tags}
+        <span class="meta">${bb.side === "over" ? "Over" : "Under"} ${bb.line} ${r.kind === "pitcher" ? "K" : "H+R+RBI"} · ${american(bb.price)} · model ${pct(bb.p)}</span></span>
+      <span class="vals"><b class="pos-text">${signedPct(bb.ev)}</b><small>edge</small></span>
+    </button>`;
+  }).join("");
+  return `<h3 class="section-title">Edges in this game · ${edges.length}</h3>
+    ${edgeControl()}
+    <div class="card list">${list}</div>
+    <p class="note">Every DraftKings price in this game at or above your minimum edge. Highlighted rows below are the same players. "proj" = lineup not posted yet (left out of Value picks and paper trades).</p>`;
+}
+
 function oddsNote() {
   const s = state.data?.odds_source;
   if (!s || (s.error && s.error.startsWith("no ODDS_API_KEY"))) return "";
@@ -307,7 +349,7 @@ function batterRow(b, line, showTeam = true) {
   const where = showTeam ? `${esc(teamAbbr(b.team))} ${b.side === "home" ? "vs" : "@"} ${esc(teamAbbr(b.opp))} · ` : "";
   const vs = b.oppSp ? `vs ${esc(b.oppSp.name)} (${b.oppSp.hand || "?"})` : "starter TBD";
   return `
-    <button class="row-btn" data-player="batter" data-game="${b.game.game_pk}" data-id="${b.id}">
+    <button class="row-btn${edgeClass(b)}" data-player="batter" data-game="${b.game.game_pk}" data-id="${b.id}">
       <span class="who">${showTeam ? "" : `<span class="order">${b.order ?? ""}</span>`}<b>${esc(b.name)}</b>${b.confirmed ? "" : '<span class="tag">proj</span>'}
         <span class="meta">${where}${b.order ? `bats ${ordinal(b.order)} · ` : ""}${vs}${bookMetaAt(b, line)}</span>${valueBadge(b)}</span>
       <span class="vals"><b>${pct(p)}</b><small>proj ${fix(b.mu)}</small></span>
@@ -317,7 +359,7 @@ function batterRow(b, line, showTeam = true) {
 function pitcherRow(p, line) {
   const po = pOver(p.pmf, line);
   return `
-    <button class="row-btn" data-player="pitcher" data-game="${p.game.game_pk}" data-id="${p.id}">
+    <button class="row-btn${edgeClass(p)}" data-player="pitcher" data-game="${p.game.game_pk}" data-id="${p.id}">
       <span class="who"><b>${esc(p.name)}</b>
         <span class="meta">${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)} · ${handName(p.hand)}${bookMetaAt(p, null)}</span>${valueBadge(p)}</span>
       <span class="vals"><b>${fix(p.mu)} K</b><small>over ${line}: ${pct(po)}</small></span>
@@ -344,6 +386,7 @@ function gameSheet(g) {
     <div class="detail">
       <h2 id="sheet-title">${esc(g.away.name)} @ ${esc(g.home.name)}</h2>
       <p class="sub">${facts}</p>
+      ${gameEdges(g)}
       <h3 class="section-title">Starting pitchers</h3>
       <div class="card list">${sps}</div>
       <h3 class="section-title">${esc(g.away.name)} · H+R+RBI over ${line}</h3>
@@ -643,6 +686,7 @@ function closeSheet() {
   document.body.style.overflow = "";
   state.sheetPlayer = null;
   state.sheetLine = null;
+  state.sheetGame = null;
 }
 function showPlayer(kind, gamePk, id) {
   const p = findPlayer(kind, gamePk, id);
@@ -658,7 +702,11 @@ document.addEventListener("click", (ev) => {
   else if (t.dataset.day) { state.day = Number(t.dataset.day); render(); }
   else if (t.dataset.batLine) { state.batLine = Number(t.dataset.batLine); store.set("batLine", state.batLine); render(); }
   else if (t.dataset.pitLine) { state.pitLine = Number(t.dataset.pitLine); store.set("pitLine", state.pitLine); render(); }
-  else if (t.dataset.edge) { state.minEdge = Number(t.dataset.edge); store.set("minEdge", state.minEdge); render(); }
+  else if (t.dataset.edge) {
+    state.minEdge = Number(t.dataset.edge); store.set("minEdge", state.minEdge); render();
+    const g = state.sheetGame != null && slate()?.games.find((x) => x.game_pk === state.sheetGame);
+    if (g && !$("#sheet").hidden) { $("#sheet-body").innerHTML = gameSheet(g); bindCharts($("#sheet-body")); }
+  }
   else if (t.dataset.calLine !== undefined) { state.calLine = t.dataset.calLine === "" ? null : t.dataset.calLine; render(); }
   else if (t.dataset.rec) { state.recKind = t.dataset.rec; state.calLine = null; store.set("recKind", state.recKind); render(); }
   else if (t.dataset.sheetLine) {
@@ -668,7 +716,7 @@ document.addEventListener("click", (ev) => {
   } else if (t.dataset.player) showPlayer(t.dataset.player, Number(t.dataset.game), Number(t.dataset.id));
   else if (t.dataset.game) {
     const g = slate().games.find((x) => x.game_pk === Number(t.dataset.game));
-    if (g) openSheet(gameSheet(g));
+    if (g) { state.sheetGame = g.game_pk; openSheet(gameSheet(g)); }
   } else if (t.hasAttribute("data-close")) closeSheet();
   else if (t.id === "refresh") load(true);
 });
