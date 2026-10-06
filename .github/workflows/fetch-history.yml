@@ -14,14 +14,18 @@ on:
         description: "Last game day (YYYY-MM-DD)"
         required: true
         default: "2026-09-28"
+      minutes_before:
+        description: "Snapshot time, minutes before first pitch (60 goes in the root, others in m<minutes>/)"
+        required: true
+        default: "60"
       max_credits:
         description: "Most credits this run may spend"
         required: true
-        default: "20000"
+        default: "15000"
       reserve:
         description: "Never let the balance fall below this (the live apps share the key)"
         required: true
-        default: "20000"
+        default: "25000"
 
 permissions:
   contents: write
@@ -45,14 +49,14 @@ jobs:
           mkdir -p odds_history
           if git fetch -q --depth=1 origin odds-history 2>/dev/null; then
             git --work-tree=odds_history checkout FETCH_HEAD -- . && git reset -q
-            ls odds_history | wc -l
+            find odds_history -name '*.json' | wc -l
           fi
       - name: Download
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
           python scripts/fetch_history.py --start "${{ inputs.start }}" --end "${{ inputs.end }}" \
-            --max-credits "${{ inputs.max_credits }}" --reserve "${{ inputs.reserve }}" --out odds_history
+            --minutes-before "${{ inputs.minutes_before }}" --max-credits "${{ inputs.max_credits }}" --reserve "${{ inputs.reserve }}" --out odds_history
       - name: Save to the odds-history branch
         if: always()
         run: |
