@@ -277,14 +277,16 @@ def test_paper_band_strategy():
     assert sorted(t["player_id"]) == [3]
     assert t.iloc[0]["profit"] == pytest.approx(12.0)
     st = {s["key"]: s for s in tracking.paper_strategies(_paper_grades())}
-    assert list(st) == ["blend1", "edge12", "edge8_12"]
+    assert list(st) == ["lean", "blend1", "edge12", "edge8_12"]
     # These rows predate the blend (no p_blend): only the retired model strategies trade them.
-    assert st["blend1"]["summary"]["n"] == 0
+    assert st["lean"]["summary"]["n"] == 0 and st["blend1"]["summary"]["n"] == 0
     assert st["edge12"]["summary"]["n"] == 4 and st["edge8_12"]["summary"]["n"] == 1
     assert st["edge8_12"]["ceiling"] == 0.12 and st["edge8_12"]["label"]
     blended = _paper_grades().assign(p_blend=0.6)
     st = {s["key"]: s for s in tracking.paper_strategies(blended)}
+    # Priced before the switch to tiers: Blended 1%+ trades them, Lean (from then on) doesn't.
     assert st["blend1"]["summary"]["n"] == 5 and st["edge12"]["summary"]["n"] == 0
+    assert st["lean"]["summary"]["n"] == 0 and st["lean"]["metric"] == "z"
 
 
 def test_strikeout_trades_wait_for_the_opposing_lineup():
@@ -303,14 +305,23 @@ def test_strikeout_trades_wait_for_the_opposing_lineup():
     assert len(t) == 1 and t.iloc[0]["ev"] == pytest.approx(0.20)
 
 
-def test_paper_portfolio_end_to_end(fake, dk, tmp_path):
+def test_paper_portfolio_end_to_end(fake, dk, tmp_path, monkeypatch):
+    # The fake season is in 2025, before the switch to tiers: let Lean trade it and Blended
+    # 1%+ stand retired, as they will on live prices.
+    moved = {"lean": {"since": None}, "blend1": {"until": "2000-01-01T00:00:00+00:00"}}
+    monkeypatch.setattr(tracking, "PAPER_STRATEGIES",
+                        [{**st, **moved.get(st["key"], {})} for st in tracking.PAPER_STRATEGIES])
     data = _publish(tmp_path, RUN1)
-    assert data["paper_strategies"][0] == data["paper"]
+    assert data["paper_strategies"][0] == data["paper"] and data["paper"]["key"] == "lean"
     for st in data["paper_strategies"][1:]:
-        assert not st["trades"]  # retired: new prices carry blended edges
+        assert not st["trades"]  # retired
     paper = data["paper"]
-    assert paper["stake"] == 10 and paper["threshold"] == 0.01 and paper["source"] == "blend"
-    assert all(t["ev"] >= 0.01 and t["result"] == "open" for t in paper["trades"])
+    assert paper["stake"] == 10 and paper["threshold"] == 1.0 and paper["source"] == "blend"
+    assert paper["metric"] == "z"
+    assert all(t["z"] >= 1.0 and t["result"] == "open" for t in paper["trades"])
+    assert data["edge_tiers"] == tracking.EDGE_TIERS
+    assert set(data["edge_sigma"]) == {"batter", "pitcher"}
+    assert set(data["record"]["market"]["tiers"]) == {"lean", "strong"}
     _finish_game(k=7, hrr=1)
     paper = _publish(tmp_path, datetime(2025, 6, 16, 16, 0, tzinfo=UTC))["paper"]
     for t in paper["trades"]:
@@ -350,3 +361,71 @@ def test_summary_scores_the_blend_on_its_own_rows():
     assert res["n_lines"] == 3 and res["n_lines_blend"] == 2
     assert res["logloss_blend"] == pytest.approx(-(np.log(0.55) + np.log(0.53)) / 2)
     assert res["logloss_book_blend"] == pytest.approx(np.log(2))
+
+
+# ---- confidence tiers -------------------------------------------------------------
+
+def test_line_values_z(monkeypatch):
+    from baseball_stats import blend
+    pmf = np.zeros(15)
+    pmf[7] = 1.0
+    entry = {"line": 5.5, "over": 100, "under": -120}
+    monkeypatch.setattr(blend, "weights", lambda: {"pitcher": {"model": 0.5, "book": 0.5, "intercept": 0.0}})
+    monkeypatch.setattr(blend, "sigma", lambda: {"pitcher": 0.02})
+    v = tracking.line_values(entry, pmf, "pitcher")
+    assert v["z_over"] == pytest.approx((v["p_blend"] - 0.5) / 0.02)
+    assert v["z_under"] == pytest.approx((1 - v["p_blend"] - 120 / 220) / 0.02)
+    assert tracking.line_values(entry, pmf, "batter")["z_over"] is None  # no sigma for hitters
+    assert tracking.line_values({"line": 5.5, "over": 100}, pmf, "pitcher")["z_over"] is None  # no DK chance
+
+
+def test_picks_by_z_choose_the_best_side_by_z(monkeypatch):
+    from baseball_stats import blend
+    monkeypatch.setattr(blend, "sigma", lambda: {"pitcher": 0.02})
+    rows = []
+    # 4.5 over at +200: ev +8%, 2.7 points over break-even (z 1.35).
+    # 5.5 over at -200: ev +5%, 3.3 points over break-even (z 1.65).
+    for line, over, under, p_over in ((4.5, 200, -250, 0.36), (5.5, -200, 165, 0.70)):
+        r = _snap(120, line, over, under)
+        r.update(p_blend=p_over, status="graded", over_won=True, clv_over=np.nan, close_line=np.nan)
+        r.pop("ev_over"), r.pop("ev_under")
+        rows.append(r)
+    g = pd.DataFrame(rows)
+    dec = lambda a: odds.american_to_decimal(a)  # noqa: E731
+    g["ev_over"] = [p * dec(o) - 1 for p, o in zip(g["p_blend"], g["over"])]
+    g["ev_under"] = [(1 - p) * dec(u) - 1 for p, u in zip(g["p_blend"], g["under"])]
+    by_ev = tracking.picks(g, -1.0)
+    assert by_ev.iloc[0]["line"] == 4.5
+    by_z = tracking.picks(g, 1.5, by="z")  # z filled from p_blend: the rows don't carry it
+    assert len(by_z) == 1 and by_z.iloc[0]["line"] == 5.5
+    assert by_z.iloc[0]["z"] == pytest.approx((0.70 - 1 / 1.5) / 0.02)
+    assert tracking.picks(g, 1.7, by="z").empty
+
+
+def test_tier_metrics_proven():
+    def bets(n, won):
+        return pd.DataFrame({"status": "graded", "price": 100, "won": [i < won for i in range(n)],
+                             "p": 0.55, "clv": np.nan, "close_line": None, "line": 5.5, "side": "over"})
+    m = tracking.tier_metrics(bets(250, 150))  # 60% at even money: 0.10 / sqrt(0.25 / 250) = 3.16
+    assert m["z_realized"] == pytest.approx(0.1 / np.sqrt(0.25 / 250)) and m["proven"]
+    assert not tracking.tier_metrics(bets(100, 60))["proven"]  # z 2.0, but too few bets
+    assert not tracking.tier_metrics(bets(250, 130))["proven"]  # enough bets, z 0.63
+    assert tracking.tier_metrics(bets(0, 0))["proven"] is False
+
+
+def test_paper_tiers_switch_without_backfill(monkeypatch):
+    from baseball_stats import blend
+    monkeypatch.setattr(blend, "sigma", lambda: {"pitcher": 0.02})
+    cut = pd.Timestamp(tracking.TIERS_FROM)
+    rows = []
+    for player, start in ((1, cut - pd.Timedelta(hours=2)), (2, cut + pd.Timedelta(hours=10))):
+        r = _snap(60, 5.5, 100, -120, player=player, start=start.isoformat())
+        r.update(p_blend=0.56, ev_over=0.12, ev_under=-0.3, status="pending", over_won=None,
+                 clv_over=np.nan, close_line=np.nan, opp_lineup_confirmed=True)
+        rows.append(r)
+    st = {s["key"]: s for s in tracking.paper_strategies(pd.DataFrame(rows))}
+    assert [t["player_id"] for t in st["blend1"]["trades"]] == [1]  # before the switch only
+    assert [t["player_id"] for t in st["lean"]["trades"]] == [2]  # z (0.56 - 0.5) / 0.02 = 3
+    assert st["lean"]["trades"][0]["z"] == pytest.approx(3.0)
+    m = tracking.summary(pd.DataFrame(rows).assign(is_close=True, game_date=pd.Timestamp("2026-10-08")))
+    assert set(m["pitcher"]["by_tier"]) == {"lean", "strong"} and m["tiers"]["strong"]["n"] == 0

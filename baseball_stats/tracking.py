@@ -24,9 +24,19 @@ EASTERN = ZoneInfo("America/New_York")
 SNAPSHOT_KEY = ["game_pk", "player_id", "kind", "line", "fetched_at"]
 
 
+def side_z(p_side: float | None, dec: float | None, kind: str | None) -> float | None:
+    """How many sigma (``blend.sigma``) our chance of a side sits above the break-even
+    rate of its price, vig included."""
+    sd = blend.sigma().get(kind or "")
+    if not sd or not dec or p_side is None or pd.isna(p_side):
+        return None
+    return (p_side - 1 / dec) / sd
+
+
 def line_values(entry: dict, pmf: np.ndarray, kind: str | None = None) -> dict:
-    """Model chance, DraftKings' no-vig chance, the blend of the two (see ``blend``) and
-    the expected return per $1 on each side at the blended chance.
+    """Model chance, DraftKings' no-vig chance, the blend of the two (see ``blend``), the
+    expected return per $1 on each side at the blended chance, and each side's z (see
+    ``side_z``; only with a DraftKings price, since sigma measures the blend).
 
     The one place these are worked out, so the log stores exactly what the app shows.
     """
@@ -41,6 +51,8 @@ def line_values(entry: dict, pmf: np.ndarray, kind: str | None = None) -> dict:
         "p_blend": pb,
         "ev_over": pb * do - 1 if do else None,
         "ev_under": (1 - pb) * du - 1 if du else None,
+        "z_over": side_z(pb, do, kind) if p_book is not None else None,
+        "z_under": side_z(1 - pb, du, kind) if p_book is not None else None,
     }
 
 
@@ -112,7 +124,7 @@ def snapshot_rows(slate: dict, models: dict[str, model.CountModel], props: dict,
         return df
     for c in ("over", "under", "batting_order"):
         df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
-    for c in ("p_book", "p_blend", "ev_over", "ev_under", "alpha", "p_shadow"):
+    for c in ("p_book", "p_blend", "ev_over", "ev_under", "z_over", "z_under", "alpha", "p_shadow"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
@@ -256,7 +268,26 @@ def update_grades(base=None) -> pd.DataFrame:
 
 EDGE_STEPS = [0.01, 0.02, 0.03, 0.05]  # same as the app's minimum-edge control
 EDGE_BUCKETS = [(0.01, 0.02), (0.02, 0.03), (0.03, 0.05), (0.05, None)]
+# Confidence tiers: our chance at least ``min_z`` sigma above the price's break-even.
+# Cumulative (a Strong pick is also a Lean one).
+EDGE_TIERS = [{"key": "lean", "label": "Lean", "min_z": 1.0},
+              {"key": "strong", "label": "Strong", "min_z": 2.0}]
+PROVEN_N, PROVEN_Z = 200, 2.0  # a tier counts as proven past this many bets and this z
 BOOTSTRAP = 2000
+
+
+def with_z(grades: pd.DataFrame) -> pd.DataFrame:
+    """``z_over``/``z_under`` on every blend-era row: as logged, or (rows logged before
+    they were) worked out from ``p_blend``, the prices and the current sigma."""
+    g = grades.copy()
+    pb = pd.to_numeric(g["p_blend"], errors="coerce") if "p_blend" in g else pd.Series(np.nan, index=g.index)
+    sd = g["kind"].map(blend.sigma()).astype(float)
+    for side, p_side in (("over", pb), ("under", 1 - pb)):
+        col = f"z_{side}"
+        dec = g[side].map(lambda x: odds.american_to_decimal(x) if pd.notna(x) else np.nan).astype(float)
+        have = pd.to_numeric(g[col], errors="coerce") if col in g else pd.Series(np.nan, index=g.index)
+        g[col] = have.fillna((p_side - 1 / dec) / sd)
+    return g
 
 
 def _p_bet(r) -> float:
@@ -266,30 +297,35 @@ def _p_bet(r) -> float:
     return r.p_model if pb is None or pd.isna(pb) else pb
 
 
-def picks(grades: pd.DataFrame, threshold: float) -> pd.DataFrame:
+def picks(grades: pd.DataFrame, threshold: float, by: str = "ev") -> pd.DataFrame:
     """The app's value pick per player, game and kind, as first seen above ``threshold``.
 
     Mirrors ``bestBet`` in web/app.js: at each download, the line and side with the
-    highest expected return; the pick is the first download where that clears the
-    threshold. Staked at a flat $1.
+    highest expected return (``by="ev"``) or the highest z (``by="z"``, see ``side_z``);
+    the pick is the first download where that clears the threshold. Staked at a flat $1.
+    By z, the best side is also chosen by z: every line of one player shares a sigma, so
+    that is the biggest gap over break-even, and choosing by ev first could pass over a
+    line that clears the bar.
     """
     if grades.empty:
         return pd.DataFrame()
     rows = []
-    g = grades.sort_values("fetched_at")
+    g = (with_z(grades) if by == "z" else grades).sort_values("fetched_at")
     for _, grp in g.groupby(["game_pk", "player_id", "kind"], sort=False):
         for _, snap in grp.groupby("fetched_at", sort=True):
             best = None
             for r in snap.itertuples(index=False):
                 for side in ("over", "under"):
-                    ev, price = getattr(r, f"ev_{side}"), getattr(r, side)
-                    if pd.isna(ev) or pd.isna(price):
+                    score, price = getattr(r, f"{by}_{side}", None), getattr(r, side)
+                    if score is None or pd.isna(score) or pd.isna(price):
                         continue
-                    if best is None or ev > best[0]:
-                        best = (ev, side, price, r)
+                    if best is None or score > best[0]:
+                        best = (score, side, price, r)
             if best is None or best[0] < threshold:
                 continue
-            ev, side, price, r = best
+            _, side, price, r = best
+            ev = getattr(r, f"ev_{side}")
+            z = getattr(r, f"z_{side}", None)
             won = None
             if r.status == "graded" and not pd.isna(r.over_won):
                 won = bool(r.over_won) if side == "over" else not bool(r.over_won)
@@ -300,6 +336,7 @@ def picks(grades: pd.DataFrame, threshold: float) -> pd.DataFrame:
                 "game_start": getattr(r, "game_start", None), "actual": getattr(r, "actual", None),
                 "game_date": pd.Timestamp(r.game_date), "fetched_at": r.fetched_at,
                 "line": r.line, "side": side, "price": int(price), "ev": float(ev),
+                "z": None if z is None or pd.isna(z) else float(z),
                 "p": float(_p_bet(r) if side == "over" else 1 - _p_bet(r)),
                 "status": r.status, "won": won, "clv": clv,
                 "close_line": None if pd.isna(r.close_line) else float(r.close_line),
@@ -347,6 +384,19 @@ def pick_metrics(p: pd.DataFrame, seed: int = 0) -> dict:
     if len(moves):
         out["moves"] = {k: float((moves == k).mean()) for k in ("toward", "away", "stayed")}
     return out
+
+
+def tier_metrics(p: pd.DataFrame) -> dict:
+    """``pick_metrics`` plus how many standard errors the win rate sits above break-even
+    (``z_realized``), and whether that is enough bets and enough z to call it proven."""
+    out = pick_metrics(p)
+    graded = p[p["status"] == "graded"] if not p.empty else p
+    if not out.get("n"):
+        return {**out, "z_realized": None, "proven": False}
+    be = 1 / graded["price"].map(odds.american_to_decimal).astype(float)
+    se = float(np.sqrt((be * (1 - be)).mean() / len(graded)))
+    z = (out["win"] - out["breakeven"]) / se if se > 0 else None
+    return {**out, "z_realized": z, "proven": bool(out["n"] >= PROVEN_N and z is not None and z >= PROVEN_Z)}
 
 
 def _logloss(p: pd.Series, y: pd.Series) -> float:
@@ -412,12 +462,15 @@ def summary(grades: pd.DataFrame, *, days: int | None = None) -> dict:
         for lo, hi in EDGE_BUCKETS:
             sel = base[(base["ev"] >= lo) & ((base["ev"] < hi) if hi else True)] if not base.empty else base
             res["by_edge"].append({"lo": lo, "hi": hi, **pick_metrics(sel)})
+        res["by_tier"] = {t["key"]: tier_metrics(picks(bets, t["min_z"], by="z")) for t in EDGE_TIERS}
         if kind == "batter" and not base.empty:
             res["by_lineup"] = {
                 "confirmed": pick_metrics(base[base["lineup_confirmed"]]),
                 "projected": pick_metrics(base[~base["lineup_confirmed"]]),
             }
         out[kind] = res
+    bets = g[g["p_blend"].notna()] if "p_blend" in g else g.iloc[:0]
+    out["tiers"] = {t["key"]: tier_metrics(picks(bets, t["min_z"], by="z")) for t in EDGE_TIERS}
     return out
 
 
@@ -432,17 +485,26 @@ PAPER_EDGE = 0.12
 # chance, used before then; those strategies keep their record but take no new trades).
 # A band strategy takes the first price at or above its floor and keeps it only if that
 # edge is below the ceiling.
+# ``metric`` is what ``threshold`` and ``ceiling`` apply to: "z" (confidence tiers) or
+# "ev". ``since``/``until`` bound the prices a strategy may trade on: at the switch to
+# tiers, Blended 1%+ stopped taking trades and Lean (1σ+) started, without backfilling.
+TIERS_FROM = "2026-10-08T00:00:00+00:00"
 PAPER_STRATEGIES = [
-    {"key": "blend1", "label": "Blended 1%+", "threshold": 0.01, "ceiling": None, "source": "blend"},
-    {"key": "edge12", "label": "Model 12%+ (retired)", "threshold": 0.12, "ceiling": None, "source": "model"},
+    {"key": "lean", "label": "Lean (1σ+)", "threshold": 1.0, "ceiling": None, "source": "blend",
+     "metric": "z", "since": TIERS_FROM, "until": None},
+    {"key": "blend1", "label": "Blended 1%+ (retired)", "threshold": 0.01, "ceiling": None, "source": "blend",
+     "metric": "ev", "since": None, "until": TIERS_FROM},
+    {"key": "edge12", "label": "Model 12%+ (retired)", "threshold": 0.12, "ceiling": None, "source": "model",
+     "metric": "ev", "since": None, "until": None},
     {"key": "edge8_12", "label": "Model 8–12% (retired)", "threshold": 0.08, "ceiling": 0.12,
-     "source": "model"},
+     "source": "model", "metric": "ev", "since": None, "until": None},
 ]
 
 
 def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
                  threshold: float = PAPER_EDGE, ceiling: float | None = None,
-                 source: str | None = None) -> pd.DataFrame:
+                 source: str | None = None, metric: str = "ev",
+                 since: str | None = None, until: str | None = None) -> pd.DataFrame:
     """Paper bets: $``stake`` on every value pick at or above ``threshold`` edge
     (and, with ``ceiling``, below it at the moment it first cleared ``threshold``).
 
@@ -464,9 +526,15 @@ def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
     if "opp_lineup_confirmed" in g:
         opp = g["opp_lineup_confirmed"].astype(object).fillna(True).astype(bool)
         g = g[(g["kind"] != "pitcher") | opp]
-    t = picks(g, threshold)
+    fetched = pd.to_datetime(g["fetched_at"], utc=True)
+    if since is not None:
+        g = g[fetched >= pd.Timestamp(since)]
+        fetched = fetched[g.index]
+    if until is not None:
+        g = g[fetched < pd.Timestamp(until)]
+    t = picks(g, threshold, by=metric)
     if ceiling is not None and not t.empty:
-        t = t[t["ev"] < ceiling].copy()
+        t = t[t[metric] < ceiling].copy()
     if t.empty:
         return t
     dec = t["price"].map(odds.american_to_decimal).astype(float)
@@ -484,11 +552,13 @@ def paper_trades(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
 def paper_portfolio(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
                     threshold: float = PAPER_EDGE, ceiling: float | None = None,
                     names: dict | None = None, key: str | None = None,
-                    label: str | None = None, source: str | None = None) -> dict:
+                    label: str | None = None, source: str | None = None, metric: str = "ev",
+                    since: str | None = None, until: str | None = None) -> dict:
     """One paper strategy in data.json: its trades, their totals and daily profit."""
-    t = paper_trades(grades, stake=stake, threshold=threshold, ceiling=ceiling, source=source)
+    t = paper_trades(grades, stake=stake, threshold=threshold, ceiling=ceiling, source=source,
+                     metric=metric, since=since, until=until)
     base = {"stake": stake, "threshold": threshold, "ceiling": ceiling, "key": key, "label": label,
-            "source": source}
+            "source": source, "metric": metric, "since": since, "until": until}
     if names and not t.empty:  # probable pitchers are logged without a name
         t["player_name"] = t["player_name"].astype(object)  # all-missing names load as float
         missing = t["player_name"].isna() | (t["player_name"].astype(str).str.strip() == "")
@@ -513,7 +583,7 @@ def paper_portfolio(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
     curve = [{"date": d.isoformat(), "profit": float(v), "cum": float(c)}
              for (d, v), c in zip(daily.items(), daily.cumsum())]
     cols = ["fetched_at", "game_date", "game_start", "game_pk", "player_id", "player_name", "kind",
-            "line", "side", "price", "ev", "p", "result", "actual", "profit", "clv", "stake"]
+            "line", "side", "price", "ev", "z", "p", "result", "actual", "profit", "clv", "stake"]
     trades = t[[c for c in cols if c in t]].iloc[::-1]  # newest first
     trades = trades.assign(fetched_at=trades["fetched_at"].astype(str),
                            game_date=pd.to_datetime(trades["game_date"]).dt.date.astype(str),
@@ -524,5 +594,6 @@ def paper_portfolio(grades: pd.DataFrame, *, stake: float = PAPER_STAKE,
 def paper_strategies(grades: pd.DataFrame, names: dict | None = None) -> list[dict]:
     """``paper_strategies`` in data.json: every strategy in ``PAPER_STRATEGIES``."""
     return [paper_portfolio(grades, threshold=st["threshold"], ceiling=st["ceiling"], names=names,
-                            key=st["key"], label=st["label"], source=st["source"])
+                            key=st["key"], label=st["label"], source=st["source"], metric=st["metric"],
+                            since=st["since"], until=st["until"])
             for st in PAPER_STRATEGIES]

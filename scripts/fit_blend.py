@@ -49,7 +49,9 @@ def fit(g: pd.DataFrame) -> dict:
     return {"model": float(a), "book": float(b), "intercept": float(m.intercept_[0]), "lines": int(len(g))}
 
 
-def apply(g: pd.DataFrame, w: dict) -> pd.DataFrame:
+def apply(g: pd.DataFrame, w: dict, sd: float | None = None) -> pd.DataFrame:
+    """The blend's chance and each side's expected return; with ``sd`` (the kind's
+    sigma) each side's z too, as tracking.line_values works it out live."""
     z = w["model"] * logit(g["p_model"]) + w["book"] * logit(g["p_book"]) + w["intercept"]
     g = g.copy()
     g["p_blend"] = 1 / (1 + np.exp(-z))
@@ -57,7 +59,21 @@ def apply(g: pd.DataFrame, w: dict) -> pd.DataFrame:
     du = g["under"].map(odds.american_to_decimal).astype(float)
     g["ev_over"] = g["p_blend"] * do - 1
     g["ev_under"] = (1 - g["p_blend"]) * du - 1
+    if sd:
+        g["z_over"] = (g["p_blend"] - 1 / do) / sd
+        g["z_under"] = ((1 - g["p_blend"]) - 1 / du) / sd
     return g
+
+
+def sigma(g: pd.DataFrame, w: dict) -> float:
+    """How far the blend usually strays from DraftKings: the sd of p_blend - p_book."""
+    b = apply(g, w)
+    return float((b["p_blend"] - b["p_book"]).std(ddof=0))
+
+
+def tiers(both: pd.DataFrame) -> dict:
+    """Bets by confidence tier (tracking.EDGE_TIERS), on rows that carry z."""
+    return {t["key"]: tracking.tier_metrics(tracking.picks(both, t["min_z"], by="z")) for t in tracking.EDGE_TIERS}
 
 
 def load(folder: str, cache: str | None = None, batter: str = "current") -> pd.DataFrame:
@@ -148,8 +164,11 @@ def main(argv=None) -> int:
         report["by_month"][kind] = {m: fit(x) for m, x in k.groupby("month") if len(x) >= 200}
         print(kind, json.dumps(weights[kind]), {m: round(w["model"], 2) for m, w in report["by_month"][kind].items()})
     report["fit"] = weights
+    sigmas = {k: sigma(g_fit[g_fit["kind"] == k], weights[k]) for k in weights}
+    report["sigma"] = sigmas
+    print("sigma (sd of p_blend - p_book on the fit prices):", {k: round(v, 4) for k, v in sigmas.items()})
     if args.test:
-        test(load(args.test, cache(args.test), args.batter), weights, report)
+        test(load(args.test, cache(args.test), args.batter), weights, report, sigmas)
     else:
         report["walk_forward"] = {}
         for kind in weights:
@@ -162,13 +181,14 @@ def main(argv=None) -> int:
         live = f", {len(parts[-1])} live closing lines" if args.live else ""
         Path(args.weights).write_text(json.dumps({
             "fitted": date.today().isoformat(),
-            "fit_prices": f"historical prices {days.min()}..{days.max()}{live}", "weights": weights}, indent=1))
+            "fit_prices": f"historical prices {days.min()}..{days.max()}{live}", "weights": weights,
+            "sigma": sigmas}, indent=1))
     if args.report:
         Path(args.report).write_text(json.dumps(report, indent=1, default=float))
     return 0
 
 
-def test(g_test: pd.DataFrame, weights: dict, report: dict) -> None:
+def test(g_test: pd.DataFrame, weights: dict, report: dict, sigmas: dict | None = None) -> None:
     for kind in ("batter", "pitcher"):
         t = apply(g_test[g_test["kind"] == kind], weights[kind])
         ll = lambda p: tracking._logloss(p, t["over_won"])  # noqa: E731
@@ -178,8 +198,14 @@ def test(g_test: pd.DataFrame, weights: dict, report: dict) -> None:
         print(f"  {kind} test log loss model %.4f book %.4f blend %.4f" % (
             report["test"][kind]["logloss_model"], report["test"][kind]["logloss_book"],
             report["test"][kind]["logloss_blend"]))
-    both = pd.concat([apply(g_test[g_test["kind"] == k], weights[k]) for k in weights])
+    both = pd.concat([apply(g_test[g_test["kind"] == k], weights[k], (sigmas or {}).get(k)) for k in weights])
     report["test"]["all"] = returns(tracking.picks(both, -1.0))
+    if sigmas:
+        report["test"]["tiers"] = tiers(both)
+        for key, m in report["test"]["tiers"].items():
+            if m.get("n"):
+                print(f"  tier {key}: {m['n']} bets, won {m['win']:.1%} (break-even {m['breakeven']:.1%}, "
+                      f"z {m['z_realized']:+.2f}), return {m['roi']:+.1%} [{m['roi_lo']:+.0%}, {m['roi_hi']:+.0%}]")
     for t, m in report["test"]["all"]["thresholds"].items():
         if m.get("n"):
             print(f"  blended edge >= {float(t):.0%}: {m['n']} bets, won {m['win']:.1%} "
