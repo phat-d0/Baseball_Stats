@@ -1,7 +1,10 @@
 # Brief: Lead / Reviewer
 
-The session that coordinates the team. It works on the default branch
-(`claude/stoic-davinci-v4p6k9`), which deploys the app.
+The session that coordinates the team. Like every role it works on its own branch,
+`team/lead`, and never commits straight to the default branch
+(`claude/stoic-davinci-v4p6k9`, which deploys the app): its own changes go through a PR
+too, which it merges once the tests pass (app or model changes only with the owner's
+go-ahead).
 
 ## Responsibilities
 
@@ -27,7 +30,7 @@ The session that coordinates the team. It works on the default branch
 
 | Role | Session | Branch |
 |---|---|---|
-| Lead | `session_01KJq9DXdy6f5BygSys7RpVc` | `claude/stoic-davinci-v4p6k9` |
+| Lead | `session_01KJq9DXdy6f5BygSys7RpVc` | `team/lead` |
 | Edge | `session_01CfMzWx5KSxECoT7kRa9292` | `team/edge` |
 | Strikeouts | `session_01CWbLsGVwBUJmyqW4hV4su2` | `team/strikeouts` |
 | Hitters | `session_011LnD1SKBMiJZonm2Srk2sH` | `team/hitters` |
