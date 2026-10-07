@@ -86,10 +86,13 @@ const sideName = (side) => (side === "over" ? "Over" : "Under");
 const unitName = (kind) => (kind === "pitcher" ? "K" : "H+R+RBI");
 // Its own meta line: "DK 4.5: O +127 (44%) · U −156 (61%)" for the line shown (or the
 // player's main DK line).
+// When DraftKings has no price at the line picked at the top, say so before showing the
+// line it does have, so the row's chance and the price aren't read as the same line.
 function bookMetaAt(player, line) {
   const b = mainBook(player, line);
+  const other = b && b.line !== line ? `No DK price at ${line} · ` : "";
   const text = b
-    ? `DK ${b.line}: O ${american(b.over)} (${implied(b.over)}) · U ${american(b.under)} (${implied(b.under)})`
+    ? `${other}DK ${b.line}: O ${american(b.over)} (${implied(b.over)}) · U ${american(b.under)} (${implied(b.under)})`
     : "No DraftKings price yet";
   return `</span><span class="meta book">${text}`;
 }
@@ -406,7 +409,7 @@ function batterRow(b, line, showTeam = true) {
     <button class="row-btn${edgeClass(b)}" data-player="batter" data-game="${b.game.game_pk}" data-id="${b.id}">
       <span class="who">${showTeam ? "" : `<span class="order">${b.order ?? ""}</span>`}<b>${esc(b.name)}</b>${b.confirmed ? "" : '<span class="tag">proj</span>'}
         <span class="meta">${where}${b.order ? `bats ${ordinal(b.order)} · ` : ""}${vs}${bookMetaAt(b, line)}</span>${valueBadge(b)}</span>
-      <span class="vals"><b>${pct(p)}</b><small>proj ${fix(b.mu)}</small></span>
+      <span class="vals"><b>${pct(p)}</b><small>over ${line} · proj ${fix(b.mu)}</small></span>
       <span class="meter" aria-hidden="true"><span style="width:${(p * 100).toFixed(1)}%"></span></span>
     </button>`;
 }
