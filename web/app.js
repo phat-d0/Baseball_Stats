@@ -410,10 +410,9 @@ function batterRow(b, line, showTeam = true) {
       <span class="meter" aria-hidden="true"><span style="width:${(p * 100).toFixed(1)}%"></span></span>
     </button>`;
 }
-function pitcherRow(p, chosen) {
-  // Starters' lines differ (2.5 for an opener, 7.5 for an ace): use DraftKings' line when
-  // it has one, so the model's chance sits next to the price it's compared with.
-  const line = mainBook(p, chosen)?.line ?? chosen;
+function pitcherRow(p, line) {
+  // The chance follows the line picked at the top; DraftKings' own line (2.5 for an
+  // opener, 7.5 for an ace) is in the meta line below, at the picked line when it has one.
   const po = pOver(p.pmf, line);
   return `
     <button class="row-btn${edgeClass(p)}" data-player="pitcher" data-game="${p.game.game_pk}" data-id="${p.id}">
