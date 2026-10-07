@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from . import collect, config, features, mlb_api, model, odds, pa_data, sim_models, slate, storage, tracking
+from . import blend, collect, config, features, mlb_api, model, odds, pa_data, sim_models, slate, storage, tracking
 
 log = logging.getLogger(__name__)
 
@@ -437,6 +437,8 @@ def publish(out: str | Path, *, history_start: date | None = None,
                    for d, s in slates],
         "odds_source": asdict(odds_status),
         "record": {**record, "market": market},
+        "edge_tiers": tracking.EDGE_TIERS,
+        "edge_sigma": {k: blend.sigma().get(k) for k in ("batter", "pitcher")},
         "paper": strategies[0],  # the main strategy
         "paper_strategies": strategies,
     }

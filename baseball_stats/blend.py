@@ -9,6 +9,11 @@ logistic stack fitted per kind by scripts/fit_blend.py:
 Edges, value picks and paper trades use it; the model's own chance is still logged so
 the Record tab can keep scoring it against DraftKings. With no weights file, or no
 DraftKings price, the model's chance is used unchanged.
+
+``sigma`` per kind is how far the blend usually strays from DraftKings (the sd of
+``p_blend - p_book`` on the fit prices). Edges are graded in those units (confidence
+tiers, docs/edge_tiers.md): a 2-point gap means more on a prop where the blend rarely
+moves than on one where it often does.
 """
 
 from __future__ import annotations
@@ -22,11 +27,20 @@ WEIGHTS_PATH = Path(__file__).with_name("blend.json")
 
 
 @lru_cache(maxsize=1)
-def weights() -> dict:
+def _file() -> dict:
     try:
-        return json.loads(WEIGHTS_PATH.read_text()).get("weights", {})
+        return json.loads(WEIGHTS_PATH.read_text())
     except FileNotFoundError:
         return {}
+
+
+def weights() -> dict:
+    return _file().get("weights", {})
+
+
+def sigma() -> dict:
+    """{kind: sd of p_blend - p_book} from the fit; empty without one."""
+    return _file().get("sigma", {})
 
 
 def _logit(p: float) -> float:
