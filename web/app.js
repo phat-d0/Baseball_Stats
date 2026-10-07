@@ -131,9 +131,9 @@ const edgeClass = (player, line = null) => (hasEdge(player, line) ? " has-edge" 
 const strategies = () => state.data?.paper_strategies || (state.data?.paper ? [state.data.paper] : []);
 
 // Live (blended) strategies first, so a prop's trade shows under the strategy in use.
-// A strategy is live until its `until` time; older data.json files only say which edges it
-// traded ("model" ones are retired).
-const isLive = (x) => ("until" in x ? x.until == null || parseTs(x.until) > Date.now() : x.source !== "model");
+// A strategy is live until its `until` time; ones that traded the model's own edges
+// ("model") retired before `until` existed.
+const isLive = (x) => x.source !== "model" && (x.until == null || parseTs(x.until) > Date.now());
 const liveFirst = () => [...strategies()].sort((a, b) => isLive(b) - isLive(a));
 
 // The paper trade recorded for this player's prop in this game, if any, and its strategy.
@@ -839,7 +839,7 @@ function viewPortfolio() {
   const rules = `<p class="note">Paper trading: $${pp?.stake ?? 10} on every DraftKings price ${what}, at the first price that clears it${band} (one trade per player and prop per game).${retired} Hitters from projected lineups are skipped. Trades are recorded automatically every run and settled from the box score; void = refunded.${all.length > 1 ? " The strategies run side by side on the same prices." : ""}</p>`;
   const head = `<h2 class="section-title">Paper strategies</h2>${all.length > 1 ? strategyList(all, pp) : ""}`;
   if (!pp || !pp.summary?.n) {
-    return `${head}<div class="empty">No paper trades yet.<br><span class="muted">One is recorded the first time a DraftKings price shows an edge of ${edgeRange(pp)}.</span></div>${rules}`;
+    return `${head}<div class="empty">No paper trades yet.<br><span class="muted">${pp?.since && parseTs(pp.since) > Date.now() ? `It starts ${new Date(parseTs(pp.since)).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}. ` : ""}One is recorded the first time a DraftKings price reaches ${edgeRange(pp)}.</span></div>${rules}`;
   }
   const s = pp.summary;
   const n = settledN(s);
