@@ -131,7 +131,10 @@ const edgeClass = (player, line = null) => (hasEdge(player, line) ? " has-edge" 
 const strategies = () => state.data?.paper_strategies || (state.data?.paper ? [state.data.paper] : []);
 
 // Live (blended) strategies first, so a prop's trade shows under the strategy in use.
-const liveFirst = () => [...strategies()].sort((a, b) => (b.source === "blend") - (a.source === "blend"));
+// A strategy is live until its `until` time; older data.json files only say which edges it
+// traded ("model" ones are retired).
+const isLive = (x) => ("until" in x ? x.until == null || parseTs(x.until) > Date.now() : x.source !== "model");
+const liveFirst = () => [...strategies()].sort((a, b) => isLive(b) - isLive(a));
 
 // The paper trade recorded for this player's prop in this game, if any, and its strategy.
 function paperTrade(gamePk, playerId, kind) {
@@ -648,13 +651,14 @@ function marketCard() {
   const m = state.data?.record?.market;
   const k = m?.[state.recKind];
   const head = `<h2 class="section-title">Are we beating DraftKings?</h2>`;
-  if (!k || !k.by_threshold) {
+  if (!k || !(k.by_threshold || k.by_tier)) {
     return `${head}<div class="card"><span class="muted">No graded DraftKings picks yet. Every price the app downloads is logged and graded after the game${m?.first_snapshot ? `; logging since ${shortDate(m.first_snapshot)}` : ""}.</span></div>`;
   }
-  // With tiers, the verdict covers every pick (the lowest % step) and each tier gets its
-  // own "realized vs implied" line below.
-  const tMin = tiers() ? EDGE_STEPS[0] : state.minEdge;
-  const t = k.by_threshold[String(tMin)] || { n: 0 };
+  // With tiers, the verdict follows the picked tier (cumulative: Lean includes Strong) and
+  // each tier also gets its own "realized vs implied" row.
+  const tier = curTier();
+  const t = (tier ? k.by_tier?.[tier.key] || m.tiers?.[tier.key] : k.by_threshold?.[String(state.minEdge)]) || { n: 0 };
+  const scope = tier ? `every ${esc(tier.label)} bet (${tier.min_z}σ+)` : `every pick at or above ${pct(state.minEdge)}`;
   const few = (t.n || 0) < MIN_PICKS;
   const v = verdict(t, few, k.picks_since);
   const pts = (x) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(1)} pts`);
@@ -674,7 +678,7 @@ function marketCard() {
       <p class="verdict-sub">${v.sub}</p>
       <div class="kv"><span>Closing line value<small>how far DK's chance moved toward our pick by first pitch</small></span>
         <span><b class="${!few && t.clv > 0 ? "pos-text" : ""}">${pts(t.clv)}</b><small>${t.clv_pos == null ? "no closing prices yet" : `${pct(t.clv_pos)} beat the close`}</small></span></div>
-      <div class="kv"><span>Return per $1<small>flat $1 on every pick at or above ${pct(tMin)}${k.picks_since ? ` since ${shortDate(k.picks_since)}` : ""}</small></span>
+      <div class="kv"><span>Return per $1<small>flat $1 on ${scope}${k.picks_since ? ` since ${shortDate(k.picks_since)}` : ""}</small></span>
         <span><b class="${!few && t.roi_lo > 0 ? "pos-text" : ""}">${signedPct(t.roi, 1)}</b><small>${t.roi == null ? "no picks yet" : `90% range ${signedPct(t.roi_lo, 0)} to ${signedPct(t.roi_hi, 0)}`}</small></span></div>
       ${llRow}
       ${tierRows(k, m)}
@@ -689,7 +693,7 @@ function marketCard() {
     ? `<p class="note">Hitters at a 1%+ edge: confirmed lineups ${signedPct(k.by_lineup.confirmed?.roi, 1)} on ${k.by_lineup.confirmed?.n || 0}, projected ${signedPct(k.by_lineup.projected?.roi, 1)} on ${k.by_lineup.projected?.n || 0}.</p>`
     : "";
   return `${head}
-    ${tiers() ? "" : edgeControl()}
+    ${edgeControl()}
     ${card}
     ${tiers() ? `<p class="note">Each tier: how often its bets won against the rate DraftKings' prices needed. z = how far apart those are, in standard errors (luck alone puts it between about −2 and +2). "Proven" only when the win rate beats break-even by more than luck explains.${tierNote()}</p>` : ""}
     <details class="more">
@@ -698,10 +702,10 @@ function marketCard() {
         <div class="kv"><span>Picks graded</span><span><b>${(t.n || 0).toLocaleString()}</b><small>${t.n_void || 0} void · ${t.n_pending || 0} pending</small></span></div>
         <div class="kv"><span>Win rate</span><span><b>${pct(t.win, 1)}</b><small>break-even ${pct(t.breakeven, 1)} · we said ${pct(t.expected, 1)}</small></span></div>
       </div>
-      <div class="card"><table><thead><tr><th>Edge</th><th>Picks</th><th>Win</th><th>Return</th><th>CLV</th></tr></thead><tbody>${edgeRows}</tbody></table></div>
+      ${edgeRows ? `<div class="card"><table><thead><tr><th>Edge</th><th>Picks</th><th>Win</th><th>Return</th><th>CLV</th></tr></thead><tbody>${edgeRows}</tbody></table></div>` : ""}
       ${lineup}
       ${shadowLine}
-      <p class="note">A pick is the first DraftKings price at or above the edge, $1 flat, graded after the game. Only prices logged since the blend went live${k.picks_since ? ` (${shortDate(k.picks_since)})` : ""} count; earlier edges came from the model alone. Closing line value: how far DraftKings' own chance moved toward the pick by first pitch, in percentage points; beating the close consistently is the surest sign of real value. Log loss scores every closing line, picked or not; if ours isn't lower than DraftKings', we know nothing the price doesn't.</p>
+      <p class="note">A pick is the first DraftKings price ${tier ? `at ${esc(tier.label)} or better` : "at or above the edge"}, $1 flat, graded after the game. Only prices logged since the blend went live${k.picks_since ? ` (${shortDate(k.picks_since)})` : ""} count; earlier edges came from the model alone. Closing line value: how far DraftKings' own chance moved toward the pick by first pitch, in percentage points; beating the close consistently is the surest sign of real value. Log loss scores every closing line, picked or not; if ours isn't lower than DraftKings', we know nothing the price doesn't.</p>
     </details>`;
 }
 
@@ -788,32 +792,36 @@ function tradeRow(t) {
   return `
     <div class="row-btn">
       <span class="who"><b>${esc(t.player_name || "")}</b>
-        <span class="meta">${what} · ${american(t.price)} · edge ${edgeText(t.ev)}</span>
+        <span class="meta">${what} · ${american(t.price)} · ${t.z != null ? `${t.z >= 0 ? "+" : "−"}${Math.abs(t.z).toFixed(1)}σ · ` : ""}edge ${edgeText(t.ev)}</span>
         <span class="meta">${timing}${t.clv != null ? ` · CLV ${t.clv >= 0 ? "+" : "−"}${Math.abs(t.clv * 100).toFixed(1)} pts` : ""}</span></span>
       <span class="vals">${right}</span>
     </div>`;
 }
 
-const edgeRange = (pp) => (pp?.ceiling ? `${pct(pp.threshold)}–${pct(pp.ceiling)}` : `${pct(pp?.threshold ?? 0.12)}+`);
+const edgeRange = (pp) => (pp?.metric === "z" ? `${pp.threshold ?? 1}σ+`
+  : pp?.ceiling ? `${pct(pp.threshold)}–${pct(pp.ceiling)}` : `${pct(pp?.threshold ?? 0.12)}+`);
 const shortLabel = (x) => String(x.label || x.key).replace(/\s*\(retired\)\s*$/i, "");
 const settledN = (s) => (s?.won || 0) + (s?.lost || 0);
 
 // One row per strategy, live first: name and status on the left, settled profit and
 // record on the right. Tapping a row shows that strategy below.
 function strategyList(all, pp) {
-  const rows = [...all].sort((a, b) => (b.source === "blend") - (a.source === "blend")).map((x) => {
+  const rows = [...all].sort((a, b) => isLive(b) - isLive(a)).map((x) => {
     const s = x.summary || {};
-    const live = x.source !== "model";
-    const status = live
-      ? `Live${s.first_trade ? ` since ${shortDate(String(s.first_trade).slice(0, 10))}` : ""}`
-      : "Retired · keeps its record";
+    const live = isLive(x);
+    const day = (ts) => new Date(parseTs(ts)).toLocaleDateString([], { month: "short", day: "numeric" });
+    const started = x.since ?? s.first_trade;
+    const status = !live
+      ? `Retired${x.until ? ` ${day(x.until)}` : ""} · keeps its record`
+      : x.since && parseTs(x.since) > Date.now() ? `Starts ${day(x.since)}`
+      : `Live${started ? ` since ${day(started)}` : ""}`;
     const n = settledN(s);
     const right = n
       ? `<b class="${s.profit > 0 ? "pos-text" : s.profit < 0 ? "neg-text" : ""}">${money(s.profit)}</b><small>${s.won}–${s.lost} · ${signedPct(s.roi, 1)}</small>`
       : `<b class="muted">–</b><small>${s.open ? `${s.open} open` : "no trades"}</small>`;
     return `
       <button class="row-btn strat${x === pp ? " on" : ""}${live ? "" : " retired"}" data-strategy="${esc(x.key)}" aria-pressed="${x === pp}">
-        <span class="who"><b>${esc(shortLabel(x))}</b><span class="meta">${status} · ${edgeRange(x)} edge</span></span>
+        <span class="who"><b>${esc(shortLabel(x))}</b><span class="meta">${status} · ${edgeRange(x)}</span></span>
         <span class="vals">${right}</span>
       </button>`;
   }).join("");
@@ -822,10 +830,13 @@ function strategyList(all, pp) {
 
 function viewPortfolio() {
   const all = strategies();
-  const pp = all.find((x) => x.key === state.strategy) || all.find((x) => x.source === "blend") || all[0];
-  const basis = pp?.source === "model" ? "the model's own chance (retired Oct 6, 2026; it keeps its record but takes no new trades)" : "our blended chance";
+  const pp = all.find((x) => x.key === state.strategy) || all.find(isLive) || all[0];
+  const retired = pp && !isLive(pp) ? " It's retired: it keeps its record but takes no new trades." : "";
   const band = pp?.ceiling ? `, as long as that edge is below ${pct(pp.ceiling)}` : "";
-  const rules = `<p class="note">Paper trading: $${pp?.stake ?? 10} on every DraftKings price whose edge, using ${basis}, is at least ${pct(pp?.threshold ?? 0.12)}, at the first price that clears it${band} (one trade per player and prop per game). Hitters from projected lineups are skipped. Trades are recorded automatically every run and settled from the box score; void = refunded.${all.length > 1 ? " The strategies run side by side on the same prices." : ""}</p>`;
+  const what = pp?.metric === "z"
+    ? `whose best side beats DraftKings' break-even by at least ${pp.threshold ?? 1}σ using our blended chance`
+    : `whose edge, using ${pp?.source === "model" ? "the model's own chance" : "our blended chance"}, is at least ${pct(pp?.threshold ?? 0.12)}`;
+  const rules = `<p class="note">Paper trading: $${pp?.stake ?? 10} on every DraftKings price ${what}, at the first price that clears it${band} (one trade per player and prop per game).${retired} Hitters from projected lineups are skipped. Trades are recorded automatically every run and settled from the box score; void = refunded.${all.length > 1 ? " The strategies run side by side on the same prices." : ""}</p>`;
   const head = `<h2 class="section-title">Paper strategies</h2>${all.length > 1 ? strategyList(all, pp) : ""}`;
   if (!pp || !pp.summary?.n) {
     return `${head}<div class="empty">No paper trades yet.<br><span class="muted">One is recorded the first time a DraftKings price shows an edge of ${edgeRange(pp)}.</span></div>${rules}`;
@@ -844,7 +855,7 @@ function viewPortfolio() {
     </div>`;
   return `
     ${head}
-    <h2 class="section-title">${esc(shortLabel(pp))}</h2>
+    <h2 class="section-title"><span class="nocase">${esc(shortLabel(pp))}</span></h2>
     ${tiles}
     ${n < 200 ? `<p class="note">${n ? `Only ${n} settled so far` : "Nothing settled yet"}; until a few hundred, results are mostly luck.</p>` : ""}
     ${pp.curve?.length ? `<h2 class="section-title">Profit over time</h2><div class="card">${profitChart(pp.curve)}</div>` : ""}
