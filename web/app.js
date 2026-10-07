@@ -58,10 +58,12 @@ const american = (a) => (a == null ? "–" : a > 0 ? `+${a}` : `−${Math.abs(a)
 const signedPct = (x, d = 0) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x * 100).toFixed(d)}%`);
 const CHECK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3.5 8.5l3 3 6-7"/></svg>';
 
-// Best-paying side across a player's DraftKings lines: {line, side, price, ev, p}.
-function bestBet(player) {
+// Best-paying side across a player's DraftKings lines (only ``line`` when given):
+// {line, side, price, ev, p}.
+function bestBet(player, line = null) {
   let best = null;
   for (const b of player.book || []) {
+    if (line != null && b.line !== line) continue;
     for (const side of ["over", "under"]) {
       const ev = b[`ev_${side}`];
       if (ev == null || b[side] == null) continue;
@@ -96,14 +98,16 @@ function bookMetaAt(player, line) {
     : "No DraftKings price yet";
   return `</span><span class="meta book">${text}`;
 }
-function valueBadge(player) {
-  const bb = bestBet(player);
+function valueBadge(player, line = null) {
+  const bb = bestBet(player, line);
   if (!bb || bb.ev < state.minEdge) return "";
   return `<span class="badge">${CHECK}${sideName(bb.side)} ${bb.line} at ${american(bb.price)} · edge ${edgeText(bb.ev)}</span>`;
 }
-// A player has an edge when his best DraftKings side clears the chosen minimum edge.
-const hasEdge = (player) => { const bb = bestBet(player); return !!bb && bb.ev >= state.minEdge; };
-const edgeClass = (player) => (hasEdge(player) ? " has-edge" : "");
+// A player has an edge when his best DraftKings side clears the chosen minimum edge. Rows
+// listed at one line (Hitters, Pitchers, lineups) only count that line's prices, so an
+// edge at Over 3.5 doesn't light up the row while Over 4.5 is picked.
+const hasEdge = (player, line = null) => { const bb = bestBet(player, line); return !!bb && bb.ev >= state.minEdge; };
+const edgeClass = (player, line = null) => (hasEdge(player, line) ? " has-edge" : "");
 
 // Paper strategies run side by side (older data.json files carry just one).
 const strategies = () => state.data?.paper_strategies || (state.data?.paper ? [state.data.paper] : []);
@@ -406,9 +410,9 @@ function batterRow(b, line, showTeam = true) {
   const where = showTeam ? `${esc(teamAbbr(b.team))} ${b.side === "home" ? "vs" : "@"} ${esc(teamAbbr(b.opp))} · ` : "";
   const vs = b.oppSp ? `vs ${esc(b.oppSp.name)} (${b.oppSp.hand || "?"})` : "starter TBD";
   return `
-    <button class="row-btn${edgeClass(b)}" data-player="batter" data-game="${b.game.game_pk}" data-id="${b.id}">
+    <button class="row-btn${edgeClass(b, line)}" data-player="batter" data-game="${b.game.game_pk}" data-id="${b.id}">
       <span class="who">${showTeam ? "" : `<span class="order">${b.order ?? ""}</span>`}<b>${esc(b.name)}</b>${b.confirmed ? "" : '<span class="tag">proj</span>'}
-        <span class="meta">${where}${b.order ? `bats ${ordinal(b.order)} · ` : ""}${vs}${bookMetaAt(b, line)}</span>${valueBadge(b)}</span>
+        <span class="meta">${where}${b.order ? `bats ${ordinal(b.order)} · ` : ""}${vs}${bookMetaAt(b, line)}</span>${valueBadge(b, line)}</span>
       <span class="vals"><b>${pct(p)}</b><small>over ${line} · proj ${fix(b.mu)}</small></span>
       <span class="meter" aria-hidden="true"><span style="width:${(p * 100).toFixed(1)}%"></span></span>
     </button>`;
@@ -418,9 +422,9 @@ function pitcherRow(p, line) {
   // opener, 7.5 for an ace) is in the meta line below, at the picked line when it has one.
   const po = pOver(p.pmf, line);
   return `
-    <button class="row-btn${edgeClass(p)}" data-player="pitcher" data-game="${p.game.game_pk}" data-id="${p.id}">
+    <button class="row-btn${edgeClass(p, line)}" data-player="pitcher" data-game="${p.game.game_pk}" data-id="${p.id}">
       <span class="who"><b>${esc(p.name)}</b>
-        <span class="meta">${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)} · ${handName(p.hand)}${bookMetaAt(p, line)}</span>${valueBadge(p)}${kLineupTag({ ...p, kind: "pitcher" })}</span>
+        <span class="meta">${esc(teamAbbr(p.team))} ${p.side === "home" ? "vs" : "@"} ${esc(teamAbbr(p.opp))} · ${gameTime(p.game.time)} · ${handName(p.hand)}${bookMetaAt(p, line)}</span>${valueBadge(p, line)}${kLineupTag({ ...p, kind: "pitcher" })}</span>
       <span class="vals"><b>${fix(p.mu)} K</b><small>model over ${line}: ${pct(po)}</small></span>
       <span class="meter" aria-hidden="true"><span style="width:${(po * 100).toFixed(1)}%"></span></span>
     </button>`;
