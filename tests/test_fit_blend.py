@@ -38,6 +38,7 @@ def test_refit_without_test_set_scores_walk_forward(monkeypatch, tmp_path):
     assert weights["fit_prices"] == "historical prices 2025-06-15..2026-08-15"
     for kind in ("batter", "pitcher"):
         assert 0 < weights["weights"][kind]["model"] < weights["weights"][kind]["book"]
+        assert 0 < weights["sigma"][kind] < 0.2  # sd of the blend's tilt away from DraftKings
     wf = json.loads(rep.read_text())["walk_forward"]["pitcher"]
     assert list(wf) == ["2025-09", "2026-08"]  # the first three months only fit
     assert all(r["logloss_blend"] < r["logloss_model"] for r in wf.values())
