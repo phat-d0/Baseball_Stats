@@ -1,6 +1,6 @@
 # Work plan and status
 
-Last updated: 2026-10-06, evening, after the team's first round (MLB postseason under way;
+Last updated: 2026-10-07, evening, after the team's third round (MLB postseason under way;
 regular season ended Sep 28). The team setup is in `CLAUDE.md` → Team and `docs/team/`.
 
 ## Done
@@ -32,11 +32,17 @@ regular season ended Sep 28). The team setup is in `CLAUDE.md` → Team and `doc
   - Strikeouts: `pa_simple` live, `pa_seq` shadow.
   - Hitters: `dist` live (unless a repo variable `BASEBALL_MODEL_BATTER` overrides it),
     `pa_sim` shadow (4,000 simulations a game); `current` stays as the fallback.
-- **Edges:** blended; minimum edge control 1 / 2 / 3 / 5%, default 1%.
+- **Edges:** blended chance; graded in confidence tiers (Oct 7, #11 + #12): Lean = our
+  chance at least 1σ above DraftKings' break-even, Strong = 2σ (σ from `blend.json`:
+  hitters 1.2 pts, strikeouts 2.5 pts). The Record tab reports realized vs break-even per
+  tier and calls a tier "proven" only past 200 bets with z ≥ 2. No tier is proven, and
+  the backtests found none (realized z −1.1 to +0.3; `docs/edge_tiers.md`). Rows on
+  Hitters/Pitchers highlight only for an edge at the picked line (#10).
 - **Paper strategies:**
-  - `Blended 1%+`: main, started Oct 6, 2026.
+  - `Lean (1σ+)`: main, from 2026-10-08 00:00 UTC.
+  - `Blended 1%+`: retired at the switch to tiers, 0–1 (−$10, Pivetta over 4.5).
   - `Model 12%+` and `Model 8–12%`: retired; they keep their record from Oct 5 (12%+ went
-    2–4, −$21.61; 8–12% went 1–1, −$4.05).
+    2–5, −$31.61; 8–12% went 2–1, +$2.49, after Oct 6's trades settled).
 - **Odds API:** 100k credits/month shared with the soccer app, reset on the 5th. After
   the backtests about 39,400 were left on Oct 6, and **22,958 at 17:41 UTC**, below the
   team's 25,000 floor (something else, probably the soccer app, is spending fast). No
@@ -44,7 +50,11 @@ regular season ended Sep 28). The team setup is in `CLAUDE.md` → Team and `doc
 
 ## Next steps (in order)
 
-0. **Team round 2: done (Oct 6).** Merged:
+0. **Team round 3: done (Oct 7).** Merged #10 (highlight per picked line), #11 (tier
+   backend: z per price, Lean/Strong, Lean paper strategy, Record by tier) and #12
+   (Lean/Strong screens). The Lead now works on `team/lead` with PRs (#9).
+
+   **Team round 2: done (Oct 6).** Merged:
    - #3 Edge: 6-hour price tooling, one-command refit (`scripts/refit_blend.sh`);
    - #5 UI: Record opens with "Are we beating DraftKings?", Portfolio redesign;
    - #6 Edge: strikeout paper trades only once the opposing lineup is posted, logged
@@ -53,7 +63,7 @@ regular season ended Sep 28). The team setup is in `CLAUDE.md` → Team and `doc
 
    Strikeouts and Hitters are idle until there is a new idea or new data.
 1. **Watch the blend live.**
-   - Record → vs DraftKings and the Blended 1%+ paper strategy accumulate from Oct 6.
+   - Record → tiers and the Lean (1σ+) paper strategy accumulate from Oct 8.
    - Expect few edges in the postseason (2–4 games a day).
    - Don't judge it before a few hundred graded bets.
 2. **Refit the blend with more data.**
