@@ -24,14 +24,14 @@ Work is split across sessions, each with a brief in `docs/team/`:
 
 | Role | Brief | Branch |
 |---|---|---|
-| Lead / Reviewer | `docs/team/lead.md` | the default branch |
+| Lead / Reviewer | `docs/team/lead.md` | `team/lead` |
 | Edge | `docs/team/edge.md` | `team/edge` |
 | Strikeouts | `docs/team/strikeouts.md` | `team/strikeouts` |
 | Hitters | `docs/team/hitters.md` | `team/hitters` |
 | UI Design | `docs/team/ui.md` | `team/ui` |
 
 If you were started with a role, read its brief before anything else. Rules for every
-role except Lead:
+role, Lead included (the Lead also reviews and merges everyone's PRs):
 
 1. **Never push to `claude/stoic-davinci-v4p6k9`** (it deploys the app). Work on your own
    branch and open a pull request into it when a piece of work is finished and tested.
