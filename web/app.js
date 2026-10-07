@@ -13,7 +13,8 @@ const state = {
   pitLine: store.get("pitLine", 5.5),
   recKind: store.get("recKind", "batter"),
   strategy: store.get("strategy2", null), // paper portfolio shown (null = the live one)
-  minEdge: store.get("minEdgeBlend", 0.01),
+  minEdge: store.get("minEdgeBlend", 0.01), // old data.json without confidence tiers
+  tier: store.get("edgeTier", "lean"),
   calLine: null, // calibration chart: null = all lines pooled
   query: "",
   sheetLine: null, // line picked inside an open player sheet
@@ -58,19 +59,31 @@ const american = (a) => (a == null ? "–" : a > 0 ? `+${a}` : `−${Math.abs(a)
 const signedPct = (x, d = 0) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x * 100).toFixed(d)}%`);
 const CHECK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3.5 8.5l3 3 6-7"/></svg>';
 
-// Best-paying side across a player's DraftKings lines (only ``line`` when given):
-// {line, side, price, ev, p}.
+// Confidence tiers (data.json "edge_tiers"): a side qualifies when its z, how many σ our
+// blended chance sits above DraftKings' break-even, reaches the tier's min_z. Older
+// data.json files have no tiers; the app then falls back to the minimum-% control.
+const tiers = () => (state.data?.edge_tiers?.length ? state.data.edge_tiers : null);
+const curTier = () => tiers() && (tiers().find((t) => t.key === state.tier) || tiers()[0]);
+// The highest tier a z reaches, or null.
+const tierFor = (z) => (tiers() && z != null ? [...tiers()].sort((a, b) => b.min_z - a.min_z).find((t) => z >= t.min_z) || null : null);
+const qualifies = (bb) => !!bb && (tiers() ? bb.z != null && bb.z >= curTier().min_z : bb.ev >= state.minEdge);
+
+// Best side across a player's DraftKings lines (only ``line`` when given), ranked by z when
+// tiers exist, else by $ edge: {line, side, price, ev, z, gap, p}. gap = our chance minus
+// DraftKings' break-even (its implied chance, margin included), in probability.
 function bestBet(player, line = null) {
   let best = null;
+  const score = (x) => (tiers() ? x.z : x.ev);
   for (const b of player.book || []) {
     if (line != null && b.line !== line) continue;
     for (const side of ["over", "under"]) {
       const ev = b[`ev_${side}`];
-      if (ev == null || b[side] == null) continue;
-      if (!best || ev > best.ev) {
-        const po = b.p_blend ?? b.p_model; // edges come from the blended chance
-        best = { line: b.line, side, price: b[side], ev, p: side === "over" ? po : 1 - po, fetchedAt: b.fetched_at };
-      }
+      const z = b[`z_${side}`] ?? null;
+      if (ev == null || b[side] == null || (tiers() && z == null)) continue;
+      const po = b.p_blend ?? b.p_model; // edges come from the blended chance
+      const p = side === "over" ? po : 1 - po;
+      const cand = { line: b.line, side, price: b[side], ev, z, p, gap: p - impliedP(b[side]), fetchedAt: b.fetched_at };
+      if (!best || score(cand) > score(best)) best = cand;
     }
   }
   return best;
@@ -84,6 +97,11 @@ const impliedP = (a) => (a == null ? null : a > 0 ? 100 / (a + 100) : -a / (-a +
 const implied = (a) => (a == null ? "–" : pct(impliedP(a)));
 // Edges are small (mostly 1–4%), so they get one decimal: "+2.4%", never a rounded "+2%".
 const edgeText = (ev) => signedPct(ev, 1);
+// Percentage points our chance sits above DraftKings' break-even: "+2.3 pts".
+const ptsText = (gap) => (gap == null ? "–" : `${gap >= 0 ? "+" : "−"}${Math.abs(gap * 100).toFixed(1)} pts`);
+const zText = (z) => (z == null ? "–" : `${z >= 0 ? "" : "−"}${Math.abs(z).toFixed(1)}σ`);
+// How a qualifying bet is described everywhere: "Lean · +2.3 pts" (tiers) or "edge +4.6%".
+const edgeLabel = (bb) => (tiers() ? `${tierFor(bb.z)?.label ?? "Below Lean"} · ${ptsText(bb.gap)} over break-even` : `edge ${edgeText(bb.ev)}`);
 const sideName = (side) => (side === "over" ? "Over" : "Under");
 const unitName = (kind) => (kind === "pitcher" ? "K" : "H+R+RBI");
 // Its own meta line: "DK 4.5: O +127 (44%) · U −156 (61%)" for the line shown (or the
@@ -100,13 +118,13 @@ function bookMetaAt(player, line) {
 }
 function valueBadge(player, line = null) {
   const bb = bestBet(player, line);
-  if (!bb || bb.ev < state.minEdge) return "";
-  return `<span class="badge">${CHECK}${sideName(bb.side)} ${bb.line} at ${american(bb.price)} · edge ${edgeText(bb.ev)}</span>`;
+  if (!qualifies(bb)) return "";
+  return `<span class="badge">${CHECK}${sideName(bb.side)} ${bb.line} at ${american(bb.price)} · ${edgeLabel(bb)}</span>`;
 }
 // A player has an edge when his best DraftKings side clears the chosen minimum edge. Rows
 // listed at one line (Hitters, Pitchers, lineups) only count that line's prices, so an
 // edge at Over 3.5 doesn't light up the row while Over 4.5 is picked.
-const hasEdge = (player, line = null) => { const bb = bestBet(player, line); return !!bb && bb.ev >= state.minEdge; };
+const hasEdge = (player, line = null) => qualifies(bestBet(player, line));
 const edgeClass = (player, line = null) => (hasEdge(player, line) ? " has-edge" : "");
 
 // Paper strategies run side by side (older data.json files carry just one).
@@ -130,7 +148,9 @@ function compareStrip(bb) {
   return `<span class="compare">
       <span><small>DraftKings</small><b>${american(bb.price)}</b><i>${implied(bb.price)}</i></span>
       <span><small>Our chance</small><b>${pct(bb.p)}</b></span>
-      <span class="edge"><small>Edge</small><b>${edgeText(bb.ev)}</b></span>
+      ${tiers()
+        ? `<span class="edge"><small>${esc(tierFor(bb.z)?.label ?? "Edge")} · ${zText(bb.z)}</small><b>${ptsText(bb.gap)}</b><i>${edgeText(bb.ev)} per $1</i></span>`
+        : `<span class="edge"><small>Edge</small><b>${edgeText(bb.ev)}</b></span>`}
     </span>`;
 }
 function tradePill(trade) {
@@ -163,15 +183,15 @@ function gameEdges(g) {
     for (const b of g.lineups[side]) rows.push({ ...b, kind: "batter", game: g, side, team: g[side], opp: g[opp], oppSp: g.pitchers[opp] });
   }
   const priced = rows.some((r) => r.book?.length);
-  const edges = rows.map((r) => ({ r, bb: bestBet(r) })).filter((x) => x.bb && x.bb.ev >= state.minEdge)
-    .sort((a, b) => b.bb.ev - a.bb.ev);
+  const edges = rows.map((r) => ({ r, bb: bestBet(r) })).filter((x) => qualifies(x.bb))
+    .sort((a, b) => rank(b.bb) - rank(a.bb));
   if (!priced) return `<h3 class="section-title">Edges in this game</h3><div class="card"><span class="muted">No DraftKings prices for this game yet.</span></div>`;
-  if (!edges.length) return `<h3 class="section-title">Edges in this game</h3>${edgeControl()}<div class="card"><span class="muted">No DraftKings price clears a ${pct(state.minEdge)} edge in this game.</span></div>`;
+  if (!edges.length) return `<h3 class="section-title">Edges in this game</h3>${edgeControl()}<div class="card"><span class="muted">No DraftKings price ${minText()} in this game.</span></div>`;
   const list = edges.map(({ r, bb }) => edgeRow(r, bb, { where: ` · ${esc(teamAbbr(r.team))}` })).join("");
   return `<h3 class="section-title">Edges in this game · ${edges.length}</h3>
     ${edgeControl()}
     <div class="card list">${list}</div>
-    <p class="note">Every DraftKings price in this game at or above your minimum edge. DraftKings % is its own chance with its margin, as its app shows it; our chance blends that price with the model. Highlighted rows below are the same players. "proj" = lineup not posted yet (left out of Value picks and paper trades).${anyKLineupInfo() ? ` "Lineup not posted" on a strikeout prop = the other team's lineup isn't out; paper trades wait for it.` : ""}</p>`;
+    <p class="note">Every DraftKings price in this game ${minText()}. DraftKings % is its own chance with its margin, as its app shows it; our chance blends that price with the model. Highlighted rows below are the same players. "proj" = lineup not posted yet (left out of Value picks and paper trades).${anyKLineupInfo() ? ` "Lineup not posted" on a strikeout prop = the other team's lineup isn't out; paper trades wait for it.` : ""}</p>`;
 }
 
 function oddsNote() {
@@ -189,7 +209,28 @@ function oddsNote() {
   if (s.error) bits.push(esc(s.error));
   return `<p class="note">${bits.join(" ")}</p>`;
 }
+const rank = (bb) => (tiers() ? bb.z : bb.ev);
+const minText = () => (tiers() ? `at ${curTier().label} or better` : `at or above a ${pct(state.minEdge)} edge`);
+// σ per kind, in points: how far our chance usually sits from DraftKings'.
+function sigmaText() {
+  const s = state.data?.edge_sigma || {};
+  const bits = [["pitcher", "strikeouts"], ["batter", "hitters"]].filter(([k]) => s[k] != null).map(([k, l]) => `${l} ${(s[k] * 100).toFixed(1)} pts`);
+  return bits.length ? ` (${bits.join(", ")})` : "";
+}
+function tierNote() {
+  if (!tiers()) return "";
+  const ts = [...tiers()].sort((a, b) => a.min_z - b.min_z);
+  const sig = (z) => (z === 1 ? "σ" : `${z}σ`);
+  const list = `${ts[0].label} = our chance beats DraftKings' break-even by ${sig(ts[0].min_z)} or more${ts.slice(1).map((t) => `, ${t.label} by ${sig(t.min_z)}`).join("")}`;
+  const m = state.data?.record?.market?.tiers || {};
+  const proven = tiers().filter((t) => m[t.key]?.proven).map((t) => t.label);
+  return ` σ ≈ how far our chance usually sits from DraftKings'${sigmaText()}. ${list}. ${proven.length ? `Proven so far: ${proven.join(", ")}.` : "No tier has a proven record yet."}`;
+}
 function edgeControl() {
+  if (tiers()) {
+    return `<div class="control-label"><span>Confidence</span><span>${esc(curTier().label)} or better</span></div>
+      <div class="segmented">${tiers().map((t) => `<button data-tier="${esc(t.key)}" class="${t.key === curTier().key ? "on" : ""}">${esc(t.label)}</button>`).join("")}</div>`;
+  }
   return `<div class="control-label"><span>Minimum edge</span><span>${pct(state.minEdge)}</span></div>
     <div class="segmented">${EDGE_STEPS.map((e) => `<button data-edge="${e}" class="${e === state.minEdge ? "on" : ""}">${pct(e)}</button>`).join("")}</div>`;
 }
@@ -199,8 +240,8 @@ function valuePicks() {
   if (!all.some((p) => p.book?.length)) return oddsNote();
   // Batters from a projected lineup stay out: they may not play (they're still in Hitters).
   const picks = all.filter((p) => p.kind === "pitcher" || p.confirmed !== false)
-    .map((p) => ({ p, bb: bestBet(p) })).filter((x) => x.bb && x.bb.ev >= state.minEdge)
-    .sort((a, b) => b.bb.ev - a.bb.ev).slice(0, 12);
+    .map((p) => ({ p, bb: bestBet(p) })).filter((x) => qualifies(x.bb))
+    .sort((a, b) => rank(b.bb) - rank(a.bb)).slice(0, 12);
   const rows = picks.map(({ p, bb }) => {
     const mins = bb.fetchedAt ? Math.round((Date.now() - parseTs(bb.fetchedAt)) / 60000) : null;
     const age = mins == null ? "" : ` · price ${mins < 60 ? `${mins} min` : `${(mins / 60).toFixed(1)} h`} old`;
@@ -209,8 +250,8 @@ function valuePicks() {
   }).join("");
   return `<h2 class="section-title">Value picks · DraftKings</h2>
     ${edgeControl()}
-    ${picks.length ? `<div class="card list">${rows}</div>` : `<div class="card"><span class="muted">Nothing above a ${pct(state.minEdge)} edge right now.</span></div>`}
-    <p class="note">Edge = how much a $1 bet is expected to return above your stake at DraftKings' price, using our chance: a blend of DraftKings' own chance and the model's (on past prices DraftKings is the more accurate of the two, so the blend leans on it). Expect few edges, mostly small; check Record → vs DraftKings before trusting them. Greyed = price over 90 minutes old. Hitters from projected lineups are left out until their lineup posts.${anyKLineupInfo() ? ` "Lineup not posted" on a strikeout prop: the other team's lineup isn't out yet, so the edge may move; paper trades take strikeout prices only once it posts.` : ""}</p>
+    ${picks.length ? `<div class="card list">${rows}</div>` : `<div class="card"><span class="muted">Nothing ${minText()} right now.</span></div>`}
+    <p class="note">${tiers() ? `Pts = how far our chance sits above DraftKings' break-even; per $1 = expected return on a $1 bet. Our chance blends DraftKings' price with the model, leaning on DraftKings.${tierNote()}` : `Edge = how much a $1 bet is expected to return above your stake at DraftKings' price, using our chance: a blend of DraftKings' own chance and the model's (on past prices DraftKings is the more accurate of the two, so the blend leans on it).`} Expect few edges, mostly small; check Record before trusting them. Greyed = price over 90 minutes old. Hitters from projected lineups are left out until their lineup posts.${anyKLineupInfo() ? ` "Lineup not posted" on a strikeout prop: the other team's lineup isn't out yet, so the edge may move; paper trades take strikeout prices only once it posts.` : ""}</p>
     ${oddsNote()}`;
 }
 // One row per bet, as DraftKings lists them: price and implied %, our chance, the edge, and
@@ -223,16 +264,19 @@ function bookTable(player) {
     const side = (s) => {
       if (b[s] == null) return "";
       const ev = b[`ev_${s}`];
-      const on = ev != null && ev >= state.minEdge;
+      const z = b[`z_${s}`] ?? null;
+      const pSide = s === "over" ? po : 1 - po;
+      const on = tiers() ? z != null && z >= curTier().min_z : ev != null && ev >= state.minEdge;
+      const edgeCell = tiers() ? `${ptsText(pSide - impliedP(b[s]))}<br><span class="muted small">${zText(z)} · ${edgeText(ev)}</span>` : edgeText(ev);
       const taken = trade && trade.line === b.line && trade.side === s;
-      return `<tr class="${on ? "edge-on" : ""}"><td>${s === "over" ? "O" : "U"} ${b.line}${taken ? ` ${tradePill(trade)}` : ""}</td><td>${american(b[s])}</td><td>${implied(b[s])}</td><td><b>${pct(s === "over" ? po : 1 - po)}</b></td><td class="${on ? "edge-pos" : ev != null && ev < 0 ? "muted" : ""}">${edgeText(ev)}</td></tr>`;
+      return `<tr class="${on ? "edge-on" : ""}"><td>${s === "over" ? "O" : "U"} ${b.line}${taken ? ` ${tradePill(trade)}` : ""}</td><td>${american(b[s])}</td><td>${implied(b[s])}</td><td><b>${pct(s === "over" ? po : 1 - po)}</b></td><td class="${on ? "edge-pos" : ev != null && ev < 0 ? "muted" : ""}">${edgeCell}</td></tr>`;
     };
     return side("over") + side("under");
   }).join("");
   const modelOnly = player.book.map((b) => `${b.line}: ${pct(b.p_model)}`).join(" · ");
   return `<h3 class="section-title">DraftKings vs our chance</h3>
     <div class="card"><table class="book"><thead><tr><th>Bet</th><th>DK</th><th>DK %</th><th>Ours</th><th>Edge</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <p class="note">DK % = DraftKings' own chance, margin included, as its app shows it. Ours = that price, margin removed, tilted by the model; edges use it. Edge = expected return per $1 at DraftKings' price; green = at or above your minimum (${pct(state.minEdge)}). The model alone says over ${modelOnly}.</p>`;
+    <p class="note">DK % = DraftKings' own chance, margin included, as its app shows it. Ours = that price, margin removed, tilted by the model; edges use it. ${tiers() ? `Edge = points above DraftKings' break-even, then σ and the expected return per $1; green = ${esc(curTier().label)} or better.${tierNote()}` : `Edge = expected return per $1 at DraftKings' price; green = at or above your minimum (${pct(state.minEdge)}).`} The model alone says over ${modelOnly}.</p>`;
 }
 
 // ---------- data access ----------
@@ -587,6 +631,19 @@ function verdict(t, few, since) {
   return { cls: "neg-text", head: "Not beating DraftKings", sub: "Negative return and no closing line value so far." };
 }
 
+// Each confidence tier's record, realized vs implied: "won 51% vs 52% needed · 41 bets",
+// then z and return. "Proven" appears only when the backend says so.
+function tierRows(k, m) {
+  if (!tiers()) return "";
+  return [...tiers()].sort((a, b) => a.min_z - b.min_z).map((tier) => {
+    const r = k.by_tier?.[tier.key] || m?.tiers?.[tier.key];
+    const name = `${esc(tier.label)} <span class="muted">(${tier.min_z}σ+)</span>`;
+    if (!r || !r.n) return `<div class="kv"><span>${name}<small>no graded bets yet</small></span><span><b class="muted">–</b><small>not proven</small></span></div>`;
+    return `<div class="kv"><span>${name}<small>won ${pct(r.win)} vs ${pct(r.breakeven)} needed · ${r.n.toLocaleString()} bet${r.n === 1 ? "" : "s"}</small></span>
+      <span><b class="${r.proven ? "pos-text" : "muted"}">${r.proven ? "proven" : "not proven"}</b><small>z ${r.z_realized == null ? "–" : `${r.z_realized >= 0 ? "+" : "−"}${Math.abs(r.z_realized).toFixed(1)}`} · ${signedPct(r.roi, 1)}${r.roi_lo != null ? ` (${signedPct(r.roi_lo, 0)} to ${signedPct(r.roi_hi, 0)})` : ""}</small></span></div>`;
+  }).join("");
+}
+
 function marketCard() {
   const m = state.data?.record?.market;
   const k = m?.[state.recKind];
@@ -594,7 +651,10 @@ function marketCard() {
   if (!k || !k.by_threshold) {
     return `${head}<div class="card"><span class="muted">No graded DraftKings picks yet. Every price the app downloads is logged and graded after the game${m?.first_snapshot ? `; logging since ${shortDate(m.first_snapshot)}` : ""}.</span></div>`;
   }
-  const t = k.by_threshold[String(state.minEdge)] || { n: 0 };
+  // With tiers, the verdict covers every pick (the lowest % step) and each tier gets its
+  // own "realized vs implied" line below.
+  const tMin = tiers() ? EDGE_STEPS[0] : state.minEdge;
+  const t = k.by_threshold[String(tMin)] || { n: 0 };
   const few = (t.n || 0) < MIN_PICKS;
   const v = verdict(t, few, k.picks_since);
   const pts = (x) => (x == null ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(1)} pts`);
@@ -614,9 +674,10 @@ function marketCard() {
       <p class="verdict-sub">${v.sub}</p>
       <div class="kv"><span>Closing line value<small>how far DK's chance moved toward our pick by first pitch</small></span>
         <span><b class="${!few && t.clv > 0 ? "pos-text" : ""}">${pts(t.clv)}</b><small>${t.clv_pos == null ? "no closing prices yet" : `${pct(t.clv_pos)} beat the close`}</small></span></div>
-      <div class="kv"><span>Return per $1<small>flat $1 on every pick at or above ${pct(state.minEdge)}${k.picks_since ? ` since ${shortDate(k.picks_since)}` : ""}</small></span>
+      <div class="kv"><span>Return per $1<small>flat $1 on every pick at or above ${pct(tMin)}${k.picks_since ? ` since ${shortDate(k.picks_since)}` : ""}</small></span>
         <span><b class="${!few && t.roi_lo > 0 ? "pos-text" : ""}">${signedPct(t.roi, 1)}</b><small>${t.roi == null ? "no picks yet" : `90% range ${signedPct(t.roi_lo, 0)} to ${signedPct(t.roi_hi, 0)}`}</small></span></div>
       ${llRow}
+      ${tierRows(k, m)}
       ${modelAlone}
     </div>`;
   const sh = k.shadow;
@@ -628,8 +689,9 @@ function marketCard() {
     ? `<p class="note">Hitters at a 1%+ edge: confirmed lineups ${signedPct(k.by_lineup.confirmed?.roi, 1)} on ${k.by_lineup.confirmed?.n || 0}, projected ${signedPct(k.by_lineup.projected?.roi, 1)} on ${k.by_lineup.projected?.n || 0}.</p>`
     : "";
   return `${head}
-    ${edgeControl()}
+    ${tiers() ? "" : edgeControl()}
     ${card}
+    ${tiers() ? `<p class="note">Each tier: how often its bets won against the rate DraftKings' prices needed. z = how far apart those are, in standard errors (luck alone puts it between about −2 and +2). "Proven" only when the win rate beats break-even by more than luck explains.${tierNote()}</p>` : ""}
     <details class="more">
       <summary>Picks, win rate and edge bands</summary>
       <div class="kv-list card">
@@ -847,8 +909,10 @@ document.addEventListener("click", (ev) => {
   else if (t.dataset.day) { state.day = Number(t.dataset.day); render(); }
   else if (t.dataset.batLine) { state.batLine = Number(t.dataset.batLine); store.set("batLine", state.batLine); render(); }
   else if (t.dataset.pitLine) { state.pitLine = Number(t.dataset.pitLine); store.set("pitLine", state.pitLine); render(); }
-  else if (t.dataset.edge) {
-    state.minEdge = Number(t.dataset.edge); store.set("minEdgeBlend", state.minEdge); render();
+  else if (t.dataset.edge || t.dataset.tier) {
+    if (t.dataset.tier) { state.tier = t.dataset.tier; store.set("edgeTier", state.tier); }
+    else { state.minEdge = Number(t.dataset.edge); store.set("minEdgeBlend", state.minEdge); }
+    render();
     const g = state.sheetGame != null && slate()?.games.find((x) => x.game_pk === state.sheetGame);
     if (g && !$("#sheet").hidden) { $("#sheet-body").innerHTML = gameSheet(g); bindCharts($("#sheet-body")); }
   }
