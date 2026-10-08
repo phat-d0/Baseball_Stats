@@ -10,6 +10,11 @@ on:
     - cron: "7 * * * *"
     - cron: "27,47 15-23,0-2 * * *"
   workflow_dispatch: # "Run workflow" button in the Actions tab
+    inputs:
+      force:
+        description: "Build even with no games yesterday, today or tomorrow"
+        type: boolean
+        default: false
   push:
     # Only the deploy branch: pushes to team branches would otherwise queue in the
     # "pages" group below and cancel a pending deploy.
@@ -28,9 +33,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Off-season and off days: skip the build (and the 20-minute chain) unless there's a game
+  # yesterday (to grade it), today or tomorrow (US Eastern dates). Pushes and forced manual
+  # runs always build. If the MLB schedule can't be reached, build anyway. The hourly
+  # schedule keeps checking, so the chain restarts by itself the day before games resume.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$EVENT" = push ] || [ "$FORCE" = true ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          from=$(TZ=America/New_York date -d yesterday +%F)
+          to=$(TZ=America/New_York date -d tomorrow +%F)
+          n=$(curl -fsS --max-time 30 "https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=$from&endDate=$to&gameType=R,F,D,L,W" | jq '.totalGames // 0') || n=1
+          echo "$n MLB games from $from to $to"
+          if [ "${n:-1}" -gt 0 ]; then echo "run=true" >> "$GITHUB_OUTPUT"; else echo "run=false" >> "$GITHUB_OUTPUT"; fi
+
   build:
+    needs: gate
     # Pushes only publish from the default branch (schedules always run there).
-    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    if: needs.gate.outputs.run == 'true' && (github.event_name != 'push' || github.ref_name == github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
@@ -144,8 +171,8 @@ jobs:
   # the game-day window each run queues the next one itself, 20 minutes after it started.
   # The schedule above restarts the chain if it ever breaks.
   next:
-    needs: deploy
-    if: always() && github.event_name != 'push'
+    needs: [gate, deploy]
+    if: always() && github.event_name != 'push' && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     permissions:
       actions: write
