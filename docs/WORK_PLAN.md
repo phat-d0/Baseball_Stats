@@ -1,7 +1,7 @@
 # Work plan and status
 
-Last updated: 2026-10-07, evening, after the team's third round (MLB postseason under way;
-regular season ended Sep 28). The team setup is in `CLAUDE.md` → Team and `docs/team/`.
+Last updated: 2026-10-08, evening (MLB postseason under way; regular season ended
+Sep 28). The Lead updates this file in the same PR as every change it records. The team setup is in `CLAUDE.md` → Team and `docs/team/`.
 
 ## Done
 
@@ -25,6 +25,7 @@ regular season ended Sep 28). The team setup is in `CLAUDE.md` → Team and `doc
 | 13 | Team round 1, UI: each edge shows DraftKings price + implied %, our chance and the edge; audit fixes (PR #1 merged; Record/Portfolio redesign in PR #5) | `docs/ui_audit.md` |
 | 14 | Team round 1, Edge: no blend refinement (per-side, per-line, shrink-on-disagreement) beat the live blend; 6-hour price tooling and one-command refit built (PR #3); no credits spent | `docs/edge_2026.md` |
 | 15 | Lead: past postseasons backfilled once (CI lacked ~90 games of 2024–25 postseason; that alone moved the strikeout blend weight 0.26 → 0.20, so treat the edge estimate as fragile, ≈0); Record scores the blend against DraftKings (`logloss_blend`) and grades blend-era picks only; publish runs only on pushes to the deploy branch (team-branch pushes were cancelling deploys) | `publish.py`, `tracking.py`, `publish.yml` |
+| 16 | Lead (#14): publish skips days with no MLB games yesterday/today/tomorrow (`gate` job; pushes and `force: true` always build). Off-season costs 0 Odds API credits anyway; this saves Actions minutes | `publish.yml` |
 
 ## Live configuration (as of the last push)
 
@@ -47,6 +48,16 @@ regular season ended Sep 28). The team setup is in `CLAUDE.md` → Team and `doc
   the backtests about 39,400 were left on Oct 6, and **22,958 at 17:41 UTC**, below the
   team's 25,000 floor (something else, probably the soccer app, is spending fast). No
   historical downloads until the Nov 5 reset.
+
+## Open items being watched
+
+- **PR #14 gate, first live run:** the merge's push run was replaced in the queue by
+  scheduled run #127 (normal). Confirm #127's gate says run=true and it builds and
+  deploys; fix through a `team/lead` PR if not.
+- **Credits:** about 22,700 left until Nov 5 (below the 25,000 floor), so Edge spends
+  nothing. Postseason live pricing uses ~26–42 credits a day; a regular-season month
+  ~12,000.
+- **After Nov 5:** Edge's 6-hour price download (next step 5) needs the owner's OK.
 
 ## Next steps (in order)
 

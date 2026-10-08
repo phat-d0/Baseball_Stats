@@ -4,6 +4,32 @@ Guidance for Claude sessions working in this repo. Read `docs/WORK_PLAN.md` firs
 says what has been built, what the latest results are, and what to do next. If you
 have a team role, read your brief in `docs/team/` next (see Team below).
 
+## Keeping memory current
+
+Sessions lose detail when their context is compacted; only this file and
+`docs/WORK_PLAN.md` survive for sure. So:
+
+- **Every change that alters how things work** (a merge, a new rule from the owner, a
+  workflow or live-model change, a new paper strategy, a credit decision) updates this
+  file and/or `docs/WORK_PLAN.md` **in the same PR**, not later.
+- This file holds durable facts and rules; `docs/WORK_PLAN.md` holds status: what's done,
+  live configuration, latest numbers, open items and what is being waited on.
+- The owner's standing instructions go under "Owner's standing rules" below the moment
+  they are given.
+- Only the Lead edits these two files; other roles propose changes in their PR
+  description.
+
+## Owner's standing rules
+
+- Recommend one option rather than listing many; report results plainly, bad ones too.
+- The Lead never commits straight to the deploy branch: it works on `team/lead` and
+  merges through PRs, like every role ("keep it in folders").
+- App or model merges need the owner's go-ahead. Docs-only and workflow-hygiene PRs the
+  Lead may merge once tests pass.
+- Pause publish runs on days with no MLB games (done in PR #14, see below).
+- Edge credits: 15,000 until the Nov 5, 2026 reset; never let the shared balance fall
+  below 25,000.
+
 ## What this is
 
 An MLB player-prop model with an iPhone web app (PWA):
@@ -57,7 +83,15 @@ role, Lead included (the Lead also reviews and merges everyone's PRs):
 - **`claude/stoic-davinci-v4p6k9` is the default branch, and pushing to it deploys the
   app.** Any push that touches `baseball_stats/`, `web/`, `requirements.txt` or
   `publish.yml` triggers `.github/workflows/publish.yml` (build → Pages deploy → `next`
-  job that chains the 20-minute runs).
+  job that chains the 20-minute runs). Pushes to other branches never trigger it (they
+  used to cancel deploys through the shared `pages` concurrency group).
+- **No-game days are skipped** (PR #14): a `gate` job asks the MLB schedule for games
+  yesterday (to grade them), today or tomorrow, US Eastern dates. With none, `build`,
+  `deploy` and the `next` chain are skipped; the hourly cron keeps checking, so runs
+  resume by themselves. Pushes always build; a manual run with `force: true` builds
+  regardless. If the schedule call fails the gate assumes games.
+- A newer queued run replaces an older queued one (concurrency), so a push run showing
+  "cancelled" with no jobs is normal when a scheduled run queued behind it.
 - Commit only tested work. Park unfinished changes in `git stash` instead of pushing them.
 - Bot-managed branches. Never edit them by hand:
   - `odds-log`: `prop_snapshots.parquet`, the append-only DraftKings price log. It can't
@@ -98,7 +132,7 @@ role, Lead included (the Lead also reviews and merges everyone's PRs):
 ## Commands
 
 ```bash
-python -m pytest -q tests                  # ~2 min, 70 tests; run before every push
+python -m pytest -q tests                  # ~2 min, ~85 tests; run before every push
 python -m baseball_stats publish --out _site [--statcast]   # what CI runs
 python scripts/evaluate.py --kind pitcher|batter [--folds 2026-09] [--variants current pa_simple] --out x.json
 python scripts/backtest.py --prices <dir of odds-history json> --out x.json     # model vs DK, edge bands, sizing
@@ -146,8 +180,11 @@ node --check web/app.js                    # after any app edit
 - **The price log is append-only.** Grades are rebuilt from it each run, so grading rules
   can change. Add columns; never rewrite old rows.
 - **Edges:** use `tracking.line_values(entry, pmf, kind)`. It returns `p_model`, `p_book`,
-  `p_blend`, `ev_over`, `ev_under`, and edges come from `p_blend`. `bestBet` in `app.js`
-  mirrors `tracking.picks`.
+  `p_blend`, `ev_over`, `ev_under`, `z_over`, `z_under`, and edges come from `p_blend`.
+  Confidence tiers (`tracking.EDGE_TIERS`): z = (our chance − break-even) / σ, σ per kind
+  from `blend.json`; Lean z ≥ 1, Strong z ≥ 2; a tier is "proven" only past 200 bets
+  with realized z ≥ 2. `bestBet` in `app.js` mirrors `tracking.picks`, and rows
+  highlight only for an edge at the picked line.
 - **App:**
   - Bump `CACHE` in `web/sw.js` whenever `app.js` or `style.css` change.
   - Colors are CSS tokens with light and dark variants.

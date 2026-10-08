@@ -20,8 +20,11 @@ go-ahead).
   - model PRs (Strikeouts, Hitters) before Edge refits the blend;
   - after a model merges, ask Edge to refit;
   - UI PRs whenever they're ready, since they don't conflict with model work.
-- **Docs:** keep `docs/WORK_PLAN.md` and `CLAUDE.md` current with each merge. Fold the
-  roles' write-ups into the plan.
+- **Docs (memory):** `CLAUDE.md` and `docs/WORK_PLAN.md` are the only memory that
+  survives a context compaction, so update them in the same PR as each merge, rule or
+  config change (see `CLAUDE.md` → Keeping memory current). Record the owner's new
+  instructions under "Owner's standing rules" right away, and open items under "Open
+  items being watched". Fold the roles' write-ups into the plan.
 - **Credits:** watch the shared Odds API balance in the publish logs. Stop Edge's spending
   if the balance nears 25,000.
 - **Sessions:** the team sessions are tagged `baseball-team`. Their IDs are listed below.
