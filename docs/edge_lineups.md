@@ -54,3 +54,31 @@ Tests:
 - `test_tracking.py::test_strikeout_trades_wait_for_the_opposing_lineup`, which also
   checks that old rows keep their trades.
 - The end-to-end publish test, which checks the data.json field.
+
+## First live days (Oct 6–8, 2026)
+
+This counts strikeout prices from the live log (`odds-log`) that carry
+`opp_lineup_confirmed`, starting with the first one at Oct 6, 22:28 UTC. There are 63
+pitcher rows covering 10 starter-games in the postseason.
+
+| Game day | Lineup | Snapshots | Best side ≥ 1% edge | Best side z ≥ 1 | Median hours before first pitch |
+|---|---|---|---|---|---|
+| Oct 6 | confirmed | 8 | 4 | – (no z yet) | 1.2 |
+| Oct 7 | projected | 14 | 4 | 0 | 13.5 |
+| Oct 7 | confirmed | 19 | 8 | 4 | 1.3 |
+| Oct 8 | projected | 9 | 0 | 0 | 7.6 |
+| Oct 8 | confirmed | 13 | 0 | 0 | 1.7 |
+
+By starter (one starter can show up in both rows):
+
+- **Projected lineup:** 2 of 9 starter-games showed a ≥ 1% edge while the opposing lineup
+  was still projected. Neither reached z ≥ 1.
+- **Once the lineup was posted:** one of those two still had its edge. The other lost
+  it.
+- **Edges that only appeared on the posted lineup:** two more starters.
+- **Lean (z ≥ 1):** one starter (Oct 7) reached Lean, and only on the posted lineup.
+
+Under the old rule, both projected-lineup edges would have been paper trades taken 13
+hours out. One of those two was gone by the time the lineup posted. That's consistent
+with the Strikeouts finding, but two cases prove nothing. Recount after the first
+regular-season month, when there are hundreds of starts rather than ten.
