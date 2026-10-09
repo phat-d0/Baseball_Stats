@@ -1,6 +1,6 @@
 # Work plan and status
 
-Last updated: 2026-10-08, evening (MLB postseason under way; regular season ended
+Last updated: 2026-10-09 (MLB postseason under way; regular season ended
 Sep 28). The Lead updates this file in the same PR as every change it records. The team setup is in `CLAUDE.md` → Team and `docs/team/`.
 
 ## Done
@@ -26,6 +26,7 @@ Sep 28). The Lead updates this file in the same PR as every change it records. T
 | 14 | Team round 1, Edge: no blend refinement (per-side, per-line, shrink-on-disagreement) beat the live blend; 6-hour price tooling and one-command refit built (PR #3); no credits spent | `docs/edge_2026.md` |
 | 15 | Lead: past postseasons backfilled once (CI lacked ~90 games of 2024–25 postseason; that alone moved the strikeout blend weight 0.26 → 0.20, so treat the edge estimate as fragile, ≈0); Record scores the blend against DraftKings (`logloss_blend`) and grades blend-era picks only; publish runs only on pushes to the deploy branch (team-branch pushes were cancelling deploys) | `publish.py`, `tracking.py`, `publish.yml` |
 | 16 | Lead (#14): publish skips days with no MLB games yesterday/today/tomorrow (`gate` job; pushes and `force: true` always build). Off-season costs 0 Odds API credits anyway; this saves Actions minutes. Confirmed live Oct 8: runs #127–#129 passed the gate on postseason days and built, deployed and chained | `publish.yml` |
+| 17 | Edge (#17): first live days of the lineup rule (Oct 6–8, 63 strikeout prices, 10 starter-games). Projected lineup: 23 prices, 4 with a ≥ 1% edge (2 starters), none at Lean. Confirmed: 40 prices, 12 with ≥ 1% (4 starters), 4 at Lean (1 starter). One of the two projected-lineup edges vanished once the lineup posted. Too few to judge; recount after the first regular-season month | `docs/edge_lineups.md` |
 
 ## Live configuration (as of the last push)
 
@@ -54,6 +55,8 @@ Sep 28). The Lead updates this file in the same PR as every change it records. T
 - **Credits:** about 22,700 left until Nov 5 (below the 25,000 floor), so Edge spends
   nothing. Postseason live pricing uses ~26–42 credits a day; a regular-season month
   ~12,000.
+- **Lineup-rule recount:** Edge recounts projected vs confirmed strikeout edges after
+  the first regular-season month (`docs/edge_lineups.md`).
 - **After Nov 5:** Edge's 6-hour price download (next step 5) needs the owner's OK.
 
 ## Next steps (in order)
